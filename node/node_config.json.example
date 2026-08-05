@@ -1,0 +1,14 @@
+{
+  "id": "PASTE_NODE_ID_FROM_DASHBOARD",
+  "apiKey": "PASTE_API_KEY_FROM_DASHBOARD",
+  "roles": ["transcoder", "nas"],
+  "port": 4500,
+  "nasStorageLocations": [
+    { "id": "default", "path": "/home/pi/.streampi", "limitBytes": 10737418240 }
+  ],
+
+  "maxConcurrentNasJobs": 1,
+
+  "_comment_maxConcurrentFileReads": "Concurrent reads of stored files, bounded separately from maxConcurrentNasJobs (which limits heavy transfer jobs). Must stay well above 1: a browser's <video> element opens several parallel range requests for one file, so capping reads at the transfer limit makes archived files unplayable on the web. Omit to use the default of 12.",
+  "maxConcurrentFileReads": 12
+}

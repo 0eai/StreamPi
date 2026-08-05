@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>StreamPi Node</title>
+    <link rel="stylesheet" href="style.css" />
+    <link rel="manifest" href="manifest.json" />
+    <link rel="icon" href="icons/icon-192.png" />
+    <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+    <meta name="theme-color" content="#0a0a0a" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="StreamPi Node" />
+</head>
+<body>
+    <div id="gate" class="gate">
+        <div class="gate-card">
+            <div class="logo-row"><img class="logo" src="icons/icon-192.png" alt="" /><h1>StreamPi Node</h1></div>
+            <p class="muted">Sign in to continue.</p>
+
+            <div id="gate-kunji-view">
+                <button id="gate-kunji-btn" class="btn-ghost gate-kunji-btn" type="button">Login with Kunji</button>
+                <div id="kunji-widget-container" class="hidden"></div>
+                <button id="gate-goto-password-btn" class="link-btn" type="button">Use password instead →</button>
+            </div>
+
+            <div id="gate-password-view" class="hidden">
+                <input id="gate-username" type="text" placeholder="Username" autocomplete="username" />
+                <input id="gate-password" type="password" placeholder="Password" autocomplete="current-password" />
+                <button id="gate-password-submit" class="btn-primary" type="button">Sign In</button>
+                <button id="gate-goto-kunji-btn" class="link-btn" type="button">← Try Kunji instead</button>
+                <button id="gate-goto-apikey-btn" class="link-btn" type="button">Use API key instead →</button>
+            </div>
+
+            <div id="gate-apikey-view" class="hidden">
+                <input id="gate-key" type="password" placeholder="API Key" autocomplete="off" />
+                <button id="gate-submit" class="btn-primary">Connect</button>
+                <button id="gate-back-to-password-btn" class="link-btn" type="button">← Use password instead</button>
+            </div>
+
+            <p id="gate-error" class="error hidden"></p>
+        </div>
+    </div>
+
+    <div id="shell" class="hidden">
+        <header>
+            <div class="title-row">
+                <img class="logo" src="icons/icon-192.png" alt="" />
+                <div>
+                    <h1 id="node-name">Node</h1>
+                    <div id="node-id" class="muted mono"></div>
+                </div>
+                <div id="role-badges" class="badges"></div>
+            </div>
+            <nav class="tabs">
+                <button class="tab active" data-tab="stats">Overview</button>
+                <button id="tab-files" class="tab hidden" data-tab="files">Files</button>
+                <button id="tab-history" class="tab hidden" data-tab="history">History</button>
+                <button class="tab" data-tab="settings">Settings</button>
+                <button id="logout-btn" class="btn-ghost logout">Disconnect</button>
+            </nav>
+        </header>
+
+        <main>
+            <section id="view-stats" class="view active">
+                <div class="tile-grid" id="tiles"></div>
+                <div id="job-card" class="card hidden">
+                    <h3>Current Job</h3>
+                    <div id="job-name" class="job-name"></div>
+                </div>
+                <div id="disk-card" class="card hidden">
+                    <h3>Storage</h3>
+                    <div class="gauge-row">
+                        <span id="disk-percent"></span>
+                        <span id="disk-label" class="muted"></span>
+                    </div>
+                    <div class="gauge"><div id="disk-bar" class="gauge-fill"></div></div>
+                </div>
+                <div id="jobs-card" class="card hidden">
+                    <h3>Active Transfers</h3>
+                    <div id="jobs-list"></div>
+                </div>
+            </section>
+
+            <section id="view-files" class="view">
+                <div class="card">
+                    <h3>Stored Files</h3>
+                    <div id="files-list"></div>
+                </div>
+            </section>
+
+            <section id="view-history" class="view">
+                <div class="card">
+                    <h3>Job History</h3>
+                    <div id="history-list"></div>
+                </div>
+            </section>
+
+            <section id="view-settings" class="view">
+                <div class="card">
+                    <div class="card-header">
+                        <h3>Identity &amp; Roles</h3>
+                        <span class="badge badge-warn">requires restart</span>
+                    </div>
+                    <label>Node ID<input id="cfg-id" /></label>
+                    <label>API Key
+                        <div class="key-row">
+                            <input id="cfg-apiKey" type="password" />
+                            <button id="cfg-apiKey-toggle" class="btn-ghost" type="button">Show</button>
+                            <button id="cfg-apiKey-copy" class="btn-ghost" type="button">Copy</button>
+                        </div>
+                    </label>
+                    <label>Roles
+                        <div class="checkbox-row">
+                            <label class="checkbox-label"><input type="checkbox" id="cfg-role-transcoder" /> Transcoder</label>
+                            <label class="checkbox-label"><input type="checkbox" id="cfg-role-nas" /> NAS Storage</label>
+                        </div>
+                    </label>
+                    <label>Port<input id="cfg-port" type="number" /></label>
+                    <label>Firebase Database URL<input id="cfg-databaseUrl" type="text" placeholder="https://your-project-default-rtdb.firebaseio.com" /></label>
+                    <p class="warn-note">⚠️ Changing these can desync this node from what the main server's dashboard believes about it — coordinate with your admin first.</p>
+                    <button id="save-restart-btn" class="btn-danger" type="button">Save &amp; Restart</button>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <h3>Storage Settings</h3>
+                        <span class="badge badge-ok">applies instantly</span>
+                    </div>
+                    <div id="cfg-locations-list"></div>
+                    <button id="cfg-add-location-btn" class="btn-ghost" type="button">+ Add Storage Location</button>
+                    <label>Max Concurrent Transfers<input id="cfg-maxConcurrentNasJobs" type="number" min="1" /></label>
+                    <div class="save-row">
+                        <button id="save-settings-btn" class="btn-primary" type="button">Save</button>
+                        <span id="settings-saved" class="ok-text hidden">Saved ✓</span>
+                    </div>
+                    <div id="cfg-migrations-status"></div>
+                </div>
+
+                <div id="restart-banner" class="banner hidden"></div>
+            </section>
+        </main>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
