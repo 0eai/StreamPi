@@ -1,0 +1,99 @@
+@import "tailwindcss";
+/* The font itself is imported in main.jsx, not here — @tailwindcss/postcss inlines
+   @import content before Vite's own CSS asset pass ever sees it, which loses the
+   file's original node_modules path and breaks the font's relative woff2 url()s
+   (confirmed: they built silently unresolved, 404ing at runtime instead of loading
+   Archivo). Importing the package directly as its own Vite-processed CSS module
+   sidesteps Tailwind's import inlining entirely. */
+
+@theme {
+  /* Surfaces — one warm-biased near-black scale. Replaces a six-way split that had
+     accumulated across the app (#000000, #0a0a0a, #141414, #1a1a1a, gray-900, gray-800). */
+  --color-bg: #0a0a0a;
+  --color-surface: #151210;
+  --color-surface-2: #1c1815;
+  --color-border: #2a2420;
+
+  --color-text: #f2f0ed;
+  --color-muted: #948d84;
+  --color-muted-2: #5c5650;
+
+  /* Brand accent — exact match to the pi-play logo. Reserved for the one primary
+     action per screen and the active-nav indicator; not sprinkled across every
+     hover/focus state the way red-500/red-400 previously were. */
+  --color-accent: #dc2626;
+  --color-accent-hover: #b91c1c;
+  --color-accent-soft: rgb(220 38 38 / 0.12);
+
+  /* Destructive actions share the accent's hue (red still reads as "danger" —
+     inventing a second red would just add palette noise) but stay quiet by default
+     and only turn solid on hover/focus, so they don't compete with whichever action
+     on the screen actually is the primary one. */
+  --color-danger: #dc2626;
+  --color-danger-hover: #b91c1c;
+
+  /* Semantic status — one shade each (previously 2-3 per meaning across the app). */
+  --color-success: #22c55e;
+  --color-warning: #f59e0b;
+  --color-info: #3b82f6;
+
+  --font-ui: "Archivo Variable", ui-sans-serif, system-ui, sans-serif;
+
+  --radius-sm: 0.375rem;
+  --radius-md: 0.625rem;
+  --radius-lg: 1rem;
+}
+
+/* z-index scale — plain Tailwind numeric/arbitrary utilities (z-40, z-[60], ...), not a
+   @theme token: Tailwind v4's z-index utilities aren't generated from a custom theme
+   namespace the way colors/radius/fonts are, so a --z-* token here would silently not
+   produce a real z-nav/z-modal class — exactly the kind of dead-class bug this pass is
+   fixing, not something to reintroduce. The scale is enforced by convention instead:
+     nav: z-40  ·  dropdown: z-50  ·  modal: z-[60]  ·  nested modal: z-[70]  ·  overlay/player: z-[100]
+   Modal.jsx and any component that stacks above the nav should follow this scale. */
+
+@layer base {
+  body {
+    font-family: var(--font-ui);
+  }
+}
+
+/* --- Entrance animations ---
+   fade-in / zoom-in / slide-in-from-* / duration-* are referenced throughout the app
+   (StreamApp, LoginScreen, UploadWizard, every modal) but were never backed by a real
+   plugin — confirmed via the production build output, they compiled to nothing. These
+   replicate the tailwindcss-animate convention closely enough that the classNames
+   already written throughout the app start working with no component changes: each
+   modifier class sets a CSS variable that a single shared `enter` keyframe reads, so
+   e.g. `animate-in fade-in zoom-in duration-500` composes correctly instead of two
+   classes fighting over one animation-name. */
+@layer utilities {
+  @keyframes enter {
+    from {
+      opacity: var(--tw-enter-opacity, 1);
+      transform: translate3d(var(--tw-enter-translate-x, 0), var(--tw-enter-translate-y, 0), 0)
+                 scale3d(var(--tw-enter-scale, 1), var(--tw-enter-scale, 1), var(--tw-enter-scale, 1));
+    }
+  }
+  .animate-in {
+    animation-name: enter;
+    animation-duration: 150ms;
+    animation-timing-function: ease-out;
+    animation-fill-mode: both;
+  }
+  .fade-in { --tw-enter-opacity: 0; }
+  .zoom-in, .zoom-in-95 { --tw-enter-scale: 0.95; }
+  .slide-in-from-bottom { --tw-enter-translate-y: 12px; }
+  .slide-in-from-bottom-4 { --tw-enter-translate-y: 1rem; }
+  .slide-in-from-bottom-10 { --tw-enter-translate-y: 2.5rem; }
+  .slide-in-from-top { --tw-enter-translate-y: -12px; }
+  .slide-in-from-right { --tw-enter-translate-x: 12px; }
+  .slide-in-from-left { --tw-enter-translate-x: -12px; }
+
+  /* Tailwind's own duration-* utilities only set transition-duration; these add
+     animation-duration under the same class names so they also drive .animate-in
+     (the two properties don't collide — an element just gets whichever apply). */
+  .duration-200 { animation-duration: 200ms; }
+  .duration-300 { animation-duration: 300ms; }
+  .duration-500 { animation-duration: 500ms; }
+}

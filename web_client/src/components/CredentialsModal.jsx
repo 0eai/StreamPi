@@ -1,0 +1,68 @@
+import React, { useState } from 'react';
+import { Server, Copy, Check } from 'lucide-react';
+import Modal from './ui/Modal';
+
+const copyToClipboard = (text) => {
+    if (navigator.clipboard && window.isSecureContext) {
+        return navigator.clipboard.writeText(text);
+    }
+    // navigator.clipboard is only available in secure contexts (HTTPS or localhost) —
+    // fall back to the legacy execCommand approach so Copy still works over plain HTTP.
+    return new Promise((resolve, reject) => {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        try {
+            document.execCommand('copy');
+            resolve();
+        } catch (e) {
+            reject(e);
+        } finally {
+            document.body.removeChild(textarea);
+        }
+    });
+};
+
+const CredentialsModal = ({ credentials, onClose }) => {
+    const [copied, setCopied] = useState(null);
+
+    const handleCopy = (field, value) => {
+        copyToClipboard(value)
+            .then(() => { setCopied(field); setTimeout(() => setCopied(null), 1500); })
+            .catch(() => alert("Couldn't copy automatically — select the text and copy it manually."));
+    };
+
+    return (
+        <Modal isOpen={!!credentials} onClose={onClose} nested title={<><Server className="w-5 h-5 text-green-500" /> Node Credentials</>}>
+            <p className="text-xs text-yellow-500 mb-4">Copy these now — the key won't be shown again.</p>
+            <div className="space-y-3">
+                <div>
+                    <label className="text-xs text-gray-500 uppercase font-bold mb-1 block">Node ID</label>
+                    <div className="flex gap-2">
+                        <code className="flex-1 bg-gray-900 border border-gray-700 rounded px-3 py-2 text-white text-xs overflow-x-auto">{credentials?.id}</code>
+                        <button type="button" onClick={() => handleCopy('id', credentials.id)} className="px-2 bg-gray-800 rounded hover:bg-gray-700" title="Copy" aria-label="Copy Node ID">
+                            {copied === 'id' ? <Check className="w-4 h-4 text-green-500"/> : <Copy className="w-4 h-4 text-gray-400"/>}
+                        </button>
+                    </div>
+                </div>
+                <div>
+                    <label className="text-xs text-gray-500 uppercase font-bold mb-1 block">API Key</label>
+                    <div className="flex gap-2">
+                        <code className="flex-1 bg-gray-900 border border-gray-700 rounded px-3 py-2 text-white text-xs overflow-x-auto break-all">{credentials?.apiKey}</code>
+                        <button type="button" onClick={() => handleCopy('apiKey', credentials.apiKey)} className="px-2 bg-gray-800 rounded hover:bg-gray-700" title="Copy" aria-label="Copy API Key">
+                            {copied === 'apiKey' ? <Check className="w-4 h-4 text-green-500"/> : <Copy className="w-4 h-4 text-gray-400"/>}
+                        </button>
+                    </div>
+                </div>
+                <p className="text-[11px] text-gray-500">Paste these into that node's <code className="text-gray-400">node_config.json</code> (id, apiKey, roles) and restart it.</p>
+            </div>
+            <button onClick={onClose} className="w-full mt-6 bg-white text-black font-bold py-2 rounded hover:bg-gray-200 transition-colors">Done</button>
+        </Modal>
+    );
+};
+
+export default CredentialsModal;
