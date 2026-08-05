@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Play, Unlock, Lock, Trash2, Film, Tv, Clock, Archive, RefreshCcw, Pencil, WifiOff } from 'lucide-react';
+import { Play, Unlock, Lock, Trash2, Film, Tv, Clock, Archive, RefreshCcw, Pencil, WifiOff, Loader2 } from 'lucide-react';
 import { formatDuration } from './utils/format';
 import { SERVER_URL, apiFetch } from './utils/api';
 import { isNasOffline, nasOfflineMessage, useNasAvailability } from './utils/nas';
@@ -57,7 +57,7 @@ export default function StreamApp() {
     // Polled separately from the library: node reachability changes while the page is
     // open, and the library is fetched once per load.
     const availableNodeIds = useNasAvailability(SERVER_URL, token);
-    const { library, loadError, selectedSeries, setSelectedSeries, fetchData, handleDelete, handleDeleteSeries, handleRenameMovie, handleRenameSeries, handleMove, handleTogglePrivacy } = libraryActions;
+    const { library, loadError, selectedSeries, setSelectedSeries, fetchData, moveStatus, handleDelete, handleDeleteSeries, handleRenameMovie, handleRenameSeries, handleMove, handleTogglePrivacy } = libraryActions;
 
     const uploads = useUploads(token, SERVER_URL, fetchData);
 
@@ -143,6 +143,20 @@ export default function StreamApp() {
                                             )
                                         )}
                                     </div>
+                                    {/* Same move-in-progress overlay as Poster.jsx, covering the whole
+                                        card (both the thumbnail and the action buttons below it) so a
+                                        second click can't fire a concurrent nas-action for this episode. */}
+                                    {moveStatus[ep.filename] !== undefined && (
+                                        <div className="absolute inset-0 z-30 bg-black/75 flex flex-col items-center justify-center gap-2 text-white">
+                                            <Loader2 className="w-6 h-6 animate-spin" />
+                                            <span className="text-xs font-bold">
+                                                {ep.is_archived ? 'Restoring' : 'Archiving'}… {moveStatus[ep.filename]}%
+                                            </span>
+                                            <div className="w-2/3 h-1.5 bg-white/20 rounded-full overflow-hidden">
+                                                <div className="h-full bg-white transition-all duration-500" style={{ width: `${moveStatus[ep.filename]}%` }} />
+                                            </div>
+                                        </div>
+                                    )}
                                     <div className="p-4 flex justify-between items-start">
                                         <div onClick={() => isNasOffline(ep, availableNodeIds) ? alert(nasOfflineMessage(ep)) : setActiveVideo(ep)} className="cursor-pointer">
                                             <h4 className="font-bold text-white mb-1">Episode {ep.episode}</h4>
@@ -177,7 +191,7 @@ export default function StreamApp() {
                                         <h3 className="text-xl font-bold text-white mb-4 flex items-center gap-2"><Clock className="w-5 h-5 text-red-600" /> Continue Watching</h3>
                                         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6">
                                             {library.continueWatching.map(item => (
-                                                <Poster key={item.path} item={item} progress={(item.progress / item.duration) * 100} onClick={setActiveVideo} serverUrl={SERVER_URL} token={token} onMove={handleMove} availableNodeIds={availableNodeIds} />
+                                                <Poster key={item.path} item={item} progress={(item.progress / item.duration) * 100} movePercent={moveStatus[item.filename]} onClick={setActiveVideo} serverUrl={SERVER_URL} token={token} onMove={handleMove} availableNodeIds={availableNodeIds} />
                                             ))}
                                         </div>
                                     </section>
@@ -186,7 +200,7 @@ export default function StreamApp() {
                                     <h3 className="text-xl font-bold text-white mb-4 flex items-center gap-2"><Film className="w-5 h-5 text-blue-500" /> Recent Movies</h3>
                                     {library.movies.length === 0 ? <div className="text-gray-500 italic text-sm">No movies found. Upload one!</div> :
                                         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6">
-                                            {library.movies.map(movie => <Poster key={movie.path} item={movie} progress={0} onClick={setActiveVideo} onDelete={handleDelete} onEdit={handleRenameMovie} onMove={handleMove} onTogglePrivacy={handleTogglePrivacy} serverUrl={SERVER_URL} token={token} availableNodeIds={availableNodeIds} />)}
+                                            {library.movies.map(movie => <Poster key={movie.path} item={movie} progress={0} movePercent={moveStatus[movie.filename]} onClick={setActiveVideo} onDelete={handleDelete} onEdit={handleRenameMovie} onMove={handleMove} onTogglePrivacy={handleTogglePrivacy} serverUrl={SERVER_URL} token={token} availableNodeIds={availableNodeIds} />)}
                                         </div>
                                     }
                                 </section>
@@ -204,7 +218,7 @@ export default function StreamApp() {
                             <section>
                                 <h3 className="text-xl font-bold text-white mb-4 flex items-center gap-2"><Film className="w-5 h-5 text-blue-500" /> All Movies</h3>
                                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6">
-                                    {library.movies.map(movie => <Poster key={movie.path} item={movie} progress={0} onClick={setActiveVideo} onDelete={handleDelete} onEdit={handleRenameMovie} onMove={handleMove} onTogglePrivacy={handleTogglePrivacy} serverUrl={SERVER_URL} token={token} availableNodeIds={availableNodeIds} />)}
+                                    {library.movies.map(movie => <Poster key={movie.path} item={movie} progress={0} movePercent={moveStatus[movie.filename]} onClick={setActiveVideo} onDelete={handleDelete} onEdit={handleRenameMovie} onMove={handleMove} onTogglePrivacy={handleTogglePrivacy} serverUrl={SERVER_URL} token={token} availableNodeIds={availableNodeIds} />)}
                                 </div>
                             </section>
                         )}

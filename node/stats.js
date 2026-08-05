@@ -74,15 +74,15 @@ export const buildStatsPayload = async () => {
             try {
                 if (fs.existsSync(filePath)) {
                     const stat = fs.statSync(filePath);
-                    jobs.push({ type: 'archive', filename, percent: info.totalSize > 0 ? Math.round((stat.size / info.totalSize) * 100) : 0, status: 'uploading' });
+                    jobs.push({ type: 'archive', filename, percent: info.totalSize > 0 ? Math.min(100, Math.round((stat.size / info.totalSize) * 100)) : 0, status: 'uploading' });
                 }
             } catch (e) {}
         }
         for (const [filename, info] of ACTIVE_DOWNLOADS.entries()) {
-            jobs.push({ type: 'restore', filename, percent: info.total > 0 ? Math.round((info.sent / info.total) * 100) : 0, status: 'downloading' });
+            jobs.push({ type: 'restore', filename, percent: info.total > 0 ? Math.min(100, Math.round((info.sent / info.total) * 100)) : 0, status: 'downloading' });
         }
         for (const info of ACTIVE_MIGRATIONS.values()) {
-            const percent = info.bytesTotal > 0 ? Math.round((info.bytesMoved / info.bytesTotal) * 100) : 0;
+            const percent = info.bytesTotal > 0 ? Math.min(100, Math.round((info.bytesMoved / info.bytesTotal) * 100)) : 0;
             jobs.push({ type: 'migrate', filename: `${path.basename(info.fromPath)} → ${path.basename(info.toPath)}`, percent, status: info.status });
         }
         payload.jobs = jobs;

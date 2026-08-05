@@ -28,6 +28,7 @@ export const nasOfflineMessage = (item) => {
 };
 
 const POLL_MS = 10_000;
+const TRANSFER_POLL_MS = 1_500;
 
 /**
  * Returns a Set of reachable NAS node ids, or null while unknown — the caller must treat null
@@ -49,4 +50,34 @@ export const useNasAvailability = (serverUrl, token) => {
     }, POLL_MS, [serverUrl, token]);
 
     return availableNodeIds;
+};
+
+/**
+ * Live progress for archive/restore transfers currently in flight, keyed by filename.
+ *
+ * The nas-action request itself blocks until the whole transfer finishes, so it can never
+ * report progress — this polls /api/nas/jobs (the same node-reported byte counters the admin
+ * dashboard already shows) in parallel, only while `activeFilenames` is non-empty. Matching by
+ * filename alone, same as the node's own job tracking, since nothing ties a job back to a
+ * specific /api/media/nas-action call.
+ *
+ * `activeFilenames` only needs to change identity for the polling loop itself to start/stop —
+ * usePolling reads the latest closure on every tick regardless of its deps array, so a filename
+ * being added or removed mid-poll is picked up on the very next tick without restarting it.
+ */
+export const useNasTransferProgress = (serverUrl, token, activeFilenames) => {
+    const [jobsByFilename, setJobsByFilename] = useState({});
+    const hasActive = activeFilenames.length > 0;
+
+    usePolling(async () => {
+        if (!token || !hasActive) { setJobsByFilename({}); return; }
+        const res = await apiFetch(serverUrl, '/api/nas/jobs', token);
+        if (!res.ok) throw new Error(`nas jobs failed: ${res.status}`);
+        const data = await res.json();
+        const next = {};
+        for (const job of data.jobs || []) next[job.filename] = job;
+        setJobsByFilename(next);
+    }, TRANSFER_POLL_MS, [serverUrl, token, hasActive]);
+
+    return jobsByFilename;
 };

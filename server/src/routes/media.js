@@ -311,6 +311,19 @@ router.get('/api/nas/availability', verifyToken, (req, res) => {
     res.json({ available });
 });
 
+// Every node's own in-progress archive/restore/migration jobs, flattened across all nodes and
+// open to any logged-in user — /api/media/nas-action blocks until a transfer finishes, so this
+// is the only way a client can see it moving rather than just waiting on that one request.
+// Jobs carry no caller/session info (see node/stats.js), so matching back to a specific
+// nas-action call has to happen by filename on the client, same as the admin dashboard does.
+router.get('/api/nas/jobs', verifyToken, (req, res) => {
+    const jobs = [];
+    for (const [nodeId, node] of KNOWN_NAS_NODES.entries()) {
+        for (const job of node.stats?.jobs || []) jobs.push({ ...job, nodeId });
+    }
+    res.json({ jobs });
+});
+
 // Lightweight, upload-picker-scoped node list — deliberately not reusing
 // /api/admin/dashboard's payload (unrelated admin data: other users' sessions, active
 // streams, full queue state) just to get free-space numbers. Open to any logged-in user,

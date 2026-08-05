@@ -4,7 +4,7 @@ import { formatDuration } from '../utils/format';
 import { apiFetch } from '../utils/api';
 import { isNasOffline, nasOfflineMessage } from '../utils/nas';
 
-const Poster = ({ item, onClick, onDelete, onEdit, onMove, onTogglePrivacy, progress, serverUrl, token, availableNodeIds }) => {
+const Poster = ({ item, onClick, onDelete, onEdit, onMove, onTogglePrivacy, progress, movePercent, serverUrl, token, availableNodeIds }) => {
 
     const nasOffline = isNasOffline(item, availableNodeIds);
     
@@ -209,6 +209,22 @@ const Poster = ({ item, onClick, onDelete, onEdit, onMove, onTogglePrivacy, prog
             <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity bg-black/10 pointer-events-none z-10">
                 <Play className="w-10 h-10 text-white fill-white drop-shadow-xl opacity-80" />
             </div>
+
+            {/* Move-in-progress Overlay — sits above the top-right action buttons (z-20) so it
+                also blocks a second click firing a concurrent nas-action call for this item.
+                movePercent starts at 0 the instant the button is clicked, before the node has
+                reported anything, rather than being absent, so this shows up with no delay. */}
+            {movePercent !== undefined && (
+                <div className="absolute inset-0 z-30 bg-black/75 flex flex-col items-center justify-center gap-2 text-white">
+                    <Loader2 className="w-6 h-6 animate-spin" />
+                    <span className="text-xs font-bold">
+                        {item.is_archived ? 'Restoring' : 'Archiving'}… {movePercent}%
+                    </span>
+                    <div className="w-2/3 h-1.5 bg-white/20 rounded-full overflow-hidden">
+                        <div className="h-full bg-white transition-all duration-500" style={{ width: `${movePercent}%` }} />
+                    </div>
+                </div>
+            )}
 
             {/* Top Right Action Buttons */}
             <div className="absolute top-2 right-2 flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity z-20">

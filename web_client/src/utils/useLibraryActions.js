@@ -1,7 +1,23 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { apiFetch, parseJsonSafe } from './api';
+import { useNasTransferProgress } from './nas';
 
 const EMPTY_LIBRARY = { continueWatching: [], movies: [], series: [] };
+
+// A move's own fetch is what clears movingFilenames in the common case — but that promise (and
+// the plain React state it resolves into) lives only in this tab's JS context, so a refresh
+// mid-transfer wipes both, even though the transfer itself is running server/node-side and
+// couldn't care less whether this tab reloaded. Persisting the in-flight filename here lets a
+// fresh page load resume polling for it instead of just silently losing track of it.
+const MOVING_FILES_KEY = 'streampi_moving_files';
+const loadMovingFilenames = () => {
+    try { return JSON.parse(localStorage.getItem(MOVING_FILES_KEY)) || []; } catch { return []; }
+};
+
+// A resumed (or freshly started) entry has no job yet the instant we start watching it — curl/
+// multer need a beat to actually begin — so "missing from /api/nas/jobs" only counts as
+// "finished" once it's been missing for longer than one real setup delay, not on the first poll.
+const MOVE_GRACE_MS = 5000;
 
 // Peeled off StreamApp.jsx — owns the library data itself plus every CRUD action on it
 // (delete/rename/move/toggle-privacy), all of which just re-fetch afterward. `onUnauthorized`
@@ -12,6 +28,41 @@ export const useLibraryActions = (token, serverUrl, onUnauthorized) => {
     const [loadError, setLoadError] = useState(false);
     const [loading, setLoading] = useState(false);
     const [selectedSeries, setSelectedSeries] = useState(null);
+    const [movingFilenames, setMovingFilenames] = useState(loadMovingFilenames);
+    // When we started (or resumed) watching each filename — render-time, not an effect, since
+    // it just needs to seed any name that doesn't have one yet, including ones resumed from
+    // localStorage on the very first render.
+    const movingSinceRef = useRef({});
+    for (const f of movingFilenames) {
+        if (!(f in movingSinceRef.current)) movingSinceRef.current[f] = Date.now();
+    }
+
+    const transferJobs = useNasTransferProgress(serverUrl, token, movingFilenames);
+    // Filenames currently mid-move, each with whatever percent the node has reported so far —
+    // 0 until the first poll tick lands one, rather than undefined, so a click shows progress
+    // starting immediately instead of a beat of nothing.
+    const moveStatus = {};
+    for (const f of movingFilenames) moveStatus[f] = transferJobs[f]?.percent ?? 0;
+
+    useEffect(() => {
+        localStorage.setItem(MOVING_FILES_KEY, JSON.stringify(movingFilenames));
+    }, [movingFilenames]);
+
+    // The only completion signal a resumed entry has left, since its original fetch (and the
+    // tab that was awaiting it) may be long gone — once a tracked filename stops appearing in
+    // the node's own job list, treat the transfer as over (succeeded or failed either way) and
+    // resync the library to find out which. Harmless no-op for the common case too, where
+    // handleMove's own finally-block below has usually already cleared it by the time this runs.
+    useEffect(() => {
+        const done = movingFilenames.filter(f =>
+            !(f in transferJobs) && Date.now() - (movingSinceRef.current[f] || 0) > MOVE_GRACE_MS
+        );
+        if (done.length === 0) return;
+        done.forEach(f => delete movingSinceRef.current[f]);
+        setMovingFilenames(prev => prev.filter(f => !done.includes(f)));
+        fetchData(token);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [transferJobs]);
 
     // Deliberately not wrapped in useCallback with a dependency array — this closes over the
     // current `library` on every render (needed for the `movies.length === 0` check below),
@@ -138,7 +189,13 @@ export const useLibraryActions = (token, serverUrl, onUnauthorized) => {
             ? 'Restore from NAS to Main Storage'
             : 'Offload to NAS Storage';
 
-        if (!confirm(`${actionText} for "${item.title || item.filename}"? This might take a moment.`)) return;
+        if (!confirm(`${actionText} for "${item.title || item.filename}"?`)) return;
+
+        // Explicit reset, not just the render-time seed above — a filename moved once before
+        // (archived, then later restored) already has a stale timestamp in the ref, which
+        // would otherwise make this new move look instantly overdue to the grace check.
+        movingSinceRef.current[item.filename] = Date.now();
+        setMovingFilenames(prev => [...prev, item.filename]);
 
         try {
             const res = await apiFetch(serverUrl, '/api/media/nas-action', token, { method: 'POST', json: { path: item.path, action } });
@@ -172,6 +229,10 @@ export const useLibraryActions = (token, serverUrl, onUnauthorized) => {
                 alert(`Move failed: ${err.error}`);
             }
         } catch (e) { alert("Move failed"); }
+        finally {
+            delete movingSinceRef.current[item.filename];
+            setMovingFilenames(prev => prev.filter(f => f !== item.filename));
+        }
     };
 
     const handleTogglePrivacy = async (item) => {
@@ -212,7 +273,7 @@ export const useLibraryActions = (token, serverUrl, onUnauthorized) => {
 
     return {
         library, loadError, loading, selectedSeries, setSelectedSeries,
-        fetchData, resetLibrary,
+        fetchData, resetLibrary, moveStatus,
         handleDelete, handleDeleteSeries, handleRenameMovie, handleRenameSeries, handleMove, handleTogglePrivacy
     };
 };

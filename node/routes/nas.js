@@ -93,20 +93,28 @@ router.get('/file/:filename', checkReadConcurrency, async (req, res) => {
 
     const stat = fs.statSync(filePath);
     const totalSize = stat.size;
-    ACTIVE_DOWNLOADS.set(filename, { sent: 0, total: totalSize, startTime: Date.now() });
-
     const range = req.headers.range;
-    let readStream;
+
+    // Only a genuine restore ever requests this file with no Range header — every streaming
+    // read (direct-play, seeks, ffmpeg poster/subtitle probes) always sends one, via the main
+    // server's own default of 'bytes=0-' when the browser didn't ask for a specific range. This
+    // used to set ACTIVE_DOWNLOADS unconditionally above the branch, so a file being watched
+    // and restored at once had every concurrent range request also resetting and adding into
+    // the SAME shared counter as the restore — pushing "sent" past the file's own size and the
+    // reported percent past 100%. Tracking only the no-range branch keeps this job restore-only.
     if (range) {
         const [startStr, endStr] = range.replace(/bytes=/, "").split("-");
         const start = parseInt(startStr, 10);
         const end = endStr ? parseInt(endStr, 10) : totalSize - 1;
-        readStream = fs.createReadStream(filePath, { start, end });
+        const readStream = fs.createReadStream(filePath, { start, end });
         res.writeHead(206, { 'Content-Range': `bytes ${start}-${end}/${totalSize}`, 'Accept-Ranges': 'bytes', 'Content-Length': (end - start) + 1, 'Content-Type': 'video/mp4' });
-    } else {
-        readStream = fs.createReadStream(filePath);
-        res.writeHead(200, { 'Content-Length': totalSize, 'Content-Type': 'video/mp4' });
+        readStream.pipe(res);
+        return;
     }
+
+    ACTIVE_DOWNLOADS.set(filename, { sent: 0, total: totalSize, startTime: Date.now() });
+    const readStream = fs.createReadStream(filePath);
+    res.writeHead(200, { 'Content-Length': totalSize, 'Content-Type': 'video/mp4' });
 
     readStream.on('data', (chunk) => { const job = ACTIVE_DOWNLOADS.get(filename); if (job) job.sent += chunk.length; });
     const cleanup = () => ACTIVE_DOWNLOADS.delete(filename);
