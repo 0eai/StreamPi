@@ -1,0 +1,213 @@
+package com.example.streampitv.data
+
+import com.google.gson.annotations.SerializedName
+
+data class LoginRequest(
+    val username: String,
+    val password: String,
+    // The server stores these on the session row (routes/auth.js) and surfaces them in
+    // the admin device list; omitting them logs the TV as "Unknown Device".
+    val device: String? = null,
+    val device_type: String? = null
+)
+
+data class LoginResponse(
+    val success: Boolean,
+    val token: String,
+    val role: String? = null,
+    val username: String? = null
+)
+
+data class ProgressRequest(val path: String, val timestamp: Long, val duration: Long)
+
+// ─── kunji discoverable login ───────────────────────────────────────────────
+/** GET /api/auth/kunji/config — 503 with an error when the server has no kunji setup. */
+data class KunjiConfig(
+    val callbackUrl: String? = null,
+    val audience: String? = null,
+    val error: String? = null
+)
+
+/**
+ * Body rp.js posts to /api/auth/kunji/session. The server only reads `scope` today, but the
+ * rest is sent for fidelity. `scope` must be an ARRAY — it is echoed into the relay record
+ * and compared against the array form encoded in the QR.
+ */
+data class KunjiSessionRequest(
+    val audience: String? = null,
+    val callbackUrl: String? = null,
+    val appName: String? = null,
+    val scope: List<String>? = null
+)
+
+/** POST /api/auth/kunji/session. The server's session TTL is 2 minutes. */
+data class KunjiSession(
+    val sessionId: String,
+    val challenge: String,
+    val expiresAt: Long = 0
+)
+
+/** GET /api/auth/kunji/status — status is pending | approved. */
+data class KunjiStatus(
+    val status: String? = null,
+    val sub: String? = null
+)
+
+/** POST /api/auth/kunji/finalize — returns the same body as a password login. */
+data class KunjiFinalizeRequest(val sessionId: String?, val sub: String)
+
+/**
+ * The short numeric code, for people who would rather type than scan. It comes from
+ * kunji's own callback host ({callbackUrl}/kunji/session/code), NOT from the StreamPi
+ * server, so it is requested with an absolute @Url.
+ */
+data class KunjiCodeRequest(val sessionId: String)
+
+data class KunjiCodeResponse(val code: String? = null)
+
+// Firebase Config Model
+data class FirebaseServerConfig(
+    @SerializedName("ip") val ip: String?,
+    @SerializedName("port") val port: Int?,
+    @SerializedName("protocol") val protocol: String?,
+    @SerializedName("url") val url: String?
+)
+
+data class LibraryResponse(
+    @SerializedName("continueWatching") val continueWatching: List<VideoItem>,
+    @SerializedName("movies") val movies: List<VideoItem>,
+    @SerializedName("series") val series: List<SeriesItem>
+)
+
+data class VideoItem(
+    val title: String?,
+    val filename: String?,
+    val path: String,
+    val poster: String?,
+    val duration: Double = 0.0,
+    val progress: Double = 0.0,
+    val series_name: String? = null,
+    val season: Int? = null,
+    val episode: Int? = null,
+    // /api/library spreads the raw media row, so these arrive for free.
+    val type: String? = null,
+    val is_archived: Int = 0,
+    val is_private: Int = 0,
+    val created_at: String? = null,
+    val last_watched: String? = null,
+    /**
+     * Stamped by /api/library for archived rows only (server/src/nasSource.js): whether the
+     * node holding this file is reachable right now. Null means the question doesn't apply —
+     * the file is on local disk — or that the server predates the field; neither is a reason
+     * to block playback, so only an explicit `false` counts as unavailable.
+     */
+    @SerializedName("nas_available") val nasAvailable: Boolean? = null,
+    @SerializedName("nas_node_id") val nasNodeId: String? = null
+) {
+    /** Archived items live on a NAS node and are addressed as nas://<nodeId>/<filename>. */
+    val isOnNas: Boolean get() = is_archived == 1 || path.startsWith("nas://")
+
+    /**
+     * On a NAS node that is currently down, so nothing can read it — streaming and restore
+     * both go through that same node. /api/stream answers 503 for these.
+     */
+    val isNasOffline: Boolean get() = nasAvailable == false
+}
+
+data class SeriesItem(
+    val title: String,
+    val episodes: List<VideoItem>
+)
+
+// ─── /api/media/info — audio + subtitle tracks ──────────────────────────────
+/**
+ * Index semantics differ per list and must not be normalised (see probeMediaInfo in the
+ * server's routes/media.js): audioTracks are re-indexed 0..n and feed /api/stream?track=
+ * (ffmpeg `-map 0:a:N`, relative), whereas subtitleTracks carry the ABSOLUTE ffmpeg
+ * stream index and feed /api/subtitle?index= (ffmpeg `-map 0:<index>`).
+ */
+data class TrackInfo(
+    val index: Int = 0,
+    val label: String? = null,
+    val language: String? = null,
+    val codec: String? = null
+) {
+    fun displayLabel(fallback: String): String =
+        label?.takeIf { it.isNotBlank() } ?: language?.takeIf { it.isNotBlank() } ?: fallback
+}
+
+data class MediaInfoResponse(
+    val fileSize: Long = 0,
+    val audioTracks: List<TrackInfo> = emptyList(),
+    val subtitleTracks: List<TrackInfo> = emptyList()
+)
+
+// ─── /api/nas/availability — which nodes can serve a file now ───────────────
+data class NasAvailabilityResponse(val available: List<String> = emptyList())
+
+// ─── /api/media/next — autoplay ─────────────────────────────────────────────
+data class NextEpisodeResponse(val next: VideoItem? = null)
+
+// ─── /api/media/nas-action — archive / restore ──────────────────────────────
+data class NasActionRequest(val path: String, val action: String)
+
+data class NasActionResponse(
+    val success: Boolean = false,
+    val message: String? = null,
+    val newPath: String? = null,
+    val error: String? = null
+)
+
+// ─── /api/auth/me — who this token belongs to ───────────────────────────────
+/** Absent on older servers, so every field is optional and callers fall back to Prefs. */
+data class MeResponse(
+    val username: String? = null,
+    val role: String? = null,
+    val status: String? = null,
+    @SerializedName("created_at") val createdAt: String? = null,
+    @SerializedName("kunji_linked") val kunjiLinked: Boolean = false
+)
+
+/**
+ * POST /api/auth/stream-token. Short-lived (6h) credential for media URLs, held only in the
+ * server's memory — so it dies on a server restart and callers must handle a 401 by minting
+ * a fresh one rather than treating it as a fatal error.
+ */
+data class StreamTokenResponse(val token: String? = null, val expiresIn: Long = 0)
+
+// ─── Deletion ───────────────────────────────────────────────────────────────
+data class DeleteMediaRequest(val path: String)
+
+data class OkResponse(val success: Boolean = false, val error: String? = null)
+
+data class DeleteSeriesResponse(
+    val success: Boolean = false,
+    val deleted: Int = 0,
+    val skipped: Int = 0,
+    val error: String? = null
+)
+
+// ─── /api/status/* — live server stats ──────────────────────────────────────
+data class RamStats(
+    val total: Long = 0,
+    val free: Long = 0,
+    val used: Long = 0,
+    val percent: Double = 0.0
+)
+
+data class NetworkStats(val up: Double = 0.0, val down: Double = 0.0)
+
+data class SystemStatus(
+    val onlineUsers: Int = 0,
+    val activeStreams: Int = 0,
+    val cpu: Double = 0.0,
+    val ram: RamStats? = null,
+    val network: NetworkStats? = null
+)
+
+data class StorageStatus(
+    val total: Long = 0,
+    val free: Long = 0,
+    val used: Long = 0,
+    val percentage: Double = 0.0
+)
