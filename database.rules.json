@@ -1,0 +1,32 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "serverConfig": {
+      // Public clients (e.g. the Android app) read this to find the Main Server's current dynamic IP
+      ".read": true,
+      ".write": false
+    },
+    "transcoders": {
+      // Legacy path from the old separate transcode_node/nas_node scripts — no longer written to, left closed
+      ".read": false,
+      ".write": false
+    },
+    "nas_nodes": {
+      ".read": false,
+      ".write": false
+    },
+    "nodes": {
+      "$id": {
+        ".write": "newData.child('apiKeyHash').val() != null && newData.child('apiKeyHash').val() === root.child('node_keys').child($id).child('hash').val() && root.child('node_keys').child($id).child('revoked').val() !== true"
+      }
+    },
+    "kunjiRelay": {
+      // Only the kunjiCallback Cloud Function and the main server's Admin SDK touch this
+      // path (Admin SDK bypasses rules regardless) — inherits the root default-deny for
+      // .read/.write. .indexOn is still needed for the resolveCode/freshCode equality
+      // query on `code` even for Admin SDK reads, to avoid an unindexed full-table scan.
+      ".indexOn": ["code"]
+    }
+  }
+}
