@@ -1,5 +1,5 @@
 import React from 'react';
-import { Smartphone, Terminal, Download, ArrowLeft } from 'lucide-react';
+import { Smartphone, Terminal, Download, ArrowLeft, Github, ExternalLink } from 'lucide-react';
 import { SERVER_URL } from '../utils/api';
 import Card from './ui/Card';
 
@@ -49,6 +49,26 @@ const DownloadsPage = () => (
                     className="bg-accent hover:brightness-110 text-white px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 transition-all shrink-0"
                 >
                     <Download className="w-4 h-4" /> Get
+                </a>
+            </div>
+
+            <div className="flex items-center justify-between gap-4 p-4 rounded-lg border border-border bg-surface-2/50">
+                <div className="flex items-center gap-4">
+                    <div className="w-11 h-11 bg-surface-2 rounded-lg flex items-center justify-center text-text shrink-0">
+                        <Github className="w-6 h-6" />
+                    </div>
+                    <div>
+                        <h3 className="font-bold">Source Code</h3>
+                        <p className="text-sm text-muted">StreamPi on GitHub</p>
+                    </div>
+                </div>
+                <a
+                    href="https://github.com/0eai/StreamPi.git"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="bg-surface-2 hover:brightness-110 text-text px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 transition-all shrink-0 border border-border"
+                >
+                    <ExternalLink className="w-4 h-4" /> Visit
                 </a>
             </div>
         </Card>
