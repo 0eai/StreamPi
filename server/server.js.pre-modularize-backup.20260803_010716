@@ -1,0 +1,3389 @@
+import express from 'express';
+import cors from 'cors';
+import fs from 'fs/promises';
+import { existsSync, createReadStream, createWriteStream, mkdirSync, statSync, readFileSync } from 'fs';
+import path from 'path';
+import os from 'os';
+import { fileURLToPath } from 'url';
+import sqlite3 from 'sqlite3';
+import { open } from 'sqlite';
+import multer from 'multer';
+import ffmpeg from 'fluent-ffmpeg';
+import https from 'https';
+import crypto from 'crypto';
+import admin from 'firebase-admin';
+import checkDiskSpace from 'check-disk-space';
+import { TelegramClient, Api } from "telegram";
+import { StringSession } from "telegram/sessions/index.js";
+import { NewMessage } from "telegram/events/index.js"; 
+import axios from 'axios';
+import console from 'console';
+import { spawn, exec } from 'child_process';
+import WebTorrent from 'webtorrent';
+import speedTest from 'speedtest-net';
+import FormData from 'form-data';
+import { PassThrough } from 'stream';
+import { once } from 'events';
+
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const PORT = 3005; 
+const HTTPS_PORT = 3006; 
+const USER_HOME = path.join(os.homedir(), 'Projects/streampi/server_data'); 
+const MEDIA_ROOT = path.join(USER_HOME, 'StreamMedia'); 
+
+let externalConfig = {};
+const configPath = path.join(__dirname, 'config.json');
+
+try {
+    if (existsSync(configPath)) {
+        const rawData = readFileSync(configPath, 'utf-8');
+        externalConfig = JSON.parse(rawData);
+        console.log("📄 Loaded config.json successfully");
+    } else {
+        console.log("⚠️ config.json not found, using hardcoded defaults");
+    }
+} catch (error) {
+    console.error("❌ Error reading config.json:", error.message);
+}
+
+const tgConfig = externalConfig.telegram || {};
+
+const DEFAULT_CONFIG = {
+    TG_API_ID: tgConfig.api_id ? Number(tgConfig.api_id) : 10000000,
+    TG_API_HASH: tgConfig.api_hash || "",
+    TG_SESSION: tgConfig.session || "", 
+    TARGET_CHANNEL_ID: tgConfig.channel_id || ""
+};
+
+let CONFIG = { ...DEFAULT_CONFIG };
+
+const EXTERNAL_ROOT = path.join(USER_HOME, 'StreamMedia_External'); 
+const PRIVATE_ROOT = path.join(USER_HOME, 'StreamMedia_Private'); 
+if (!existsSync(PRIVATE_ROOT)) mkdirSync(PRIVATE_ROOT, { recursive: true });
+
+const TEMP_DIR = path.join(USER_HOME, 'temp_uploads');
+const HIDDEN_DATA_FOLDER = path.join(MEDIA_ROOT, '.stream_db');
+const THUMB_FOLDER = path.join(HIDDEN_DATA_FOLDER, 'thumbs');
+const DB_PATH = path.join(HIDDEN_DATA_FOLDER, 'media.db');
+const APK_PATH = path.join(USER_HOME, 'streampi-client.apk');
+const SSL_KEY_PATH = path.join(HIDDEN_DATA_FOLDER, 'server.key');
+const SSL_CERT_PATH = path.join(HIDDEN_DATA_FOLDER, 'server.cert');
+const LOG_FILE = path.join(USER_HOME, 'streampi_server.log'); 
+const SERVICE_ACCOUNT_PATH = './service-account.json';
+
+const FIREBASE_DB_URL = externalConfig.firebase_db_url || "";
+
+const MANUAL_PUBLIC_URL = ""; 
+const VIDEO_EXTS = new Set(['.mp4', '.mkv', '.avi', '.mov', '.webm', '.m4v']);
+const MIN_FREE_SPACE_BYTES = 30 * 1024 * 1024 * 1024;
+
+const CLIENT_BUILD_PATH = path.join(__dirname, '../web_client/dist');
+
+let db;
+let tgClient;
+let isDownloading = false;
+let cancelCurrentDownload = false;
+let isAssigningJob = false; // Fixed: Defined before use
+let isFirebaseActive = false;
+let lastKnownConfig = null;
+
+const torrentClient = new WebTorrent();
+torrentClient.on('error', (err) => {
+    console.error('🔥 [FATAL] WebTorrent Client Error:', err.message);
+});
+
+const SESSIONS = new Map();
+const ACTIVE_STREAMS = new Map();
+const JOB_PROGRESS = new Map();
+const KNOWN_NODES = new Map();
+let KNOWN_NAS_NODES = new Map();
+
+const KUNJI_SESSION_TTL_MS = 2 * 60 * 1000;
+const KUNJI_SESSIONS = new Map(); // sessionId -> { status, sub, claims, unsub, approvedAt }
+const KUNJI_RECENTLY_APPROVED = new Map(); // sub -> { sub, claims, approvedAt }
+const kunjiToken = (n) => crypto.randomBytes(n).toString('base64url');
+
+const kunjiDetach = (sessionId) => {
+    const e = KUNJI_SESSIONS.get(sessionId);
+    if (e?.unsub) { e.unsub(); e.unsub = null; }
+};
+
+async function startKunjiSession(scope) {
+    const audience = (externalConfig.kunji && externalConfig.kunji.audience) || '';
+    const sessionId = kunjiToken(16);
+    const challenge = kunjiToken(32);
+    const expiresAt = Date.now() + KUNJI_SESSION_TTL_MS;
+    const ref = admin.database().ref(`kunjiRelay/${sessionId}`);
+
+    await ref.set({
+        challenge,
+        audience,
+        status: 'pending',
+        sub: null,
+        claims: null,
+        expiresAt,
+        ...(scope ? { scope } : {})
+    });
+
+    const entry = { status: 'pending', sub: null, claims: null, unsub: null, approvedAt: null };
+    const listener = ref.on('value', (snap) => {
+        const d = snap.val();
+        if (!d) return;
+        entry.status = d.status;
+        entry.sub = d.sub || null;
+        entry.claims = d.claims || null;
+        if (d.status === 'approved' && !entry.approvedAt) {
+            entry.approvedAt = Date.now();
+            KUNJI_RECENTLY_APPROVED.set(d.sub, { sub: d.sub, claims: d.claims, approvedAt: Date.now() });
+            setTimeout(() => KUNJI_RECENTLY_APPROVED.delete(d.sub), 60_000);
+            kunjiDetach(sessionId);
+        }
+    }, (err) => console.error('[kunji] RTDB listener error:', err.message));
+    entry.unsub = () => ref.off('value', listener);
+    KUNJI_SESSIONS.set(sessionId, entry);
+    setTimeout(() => { kunjiDetach(sessionId); KUNJI_SESSIONS.delete(sessionId); }, KUNJI_SESSION_TTL_MS + 10_000);
+    return { sessionId, challenge, expiresAt };
+}
+
+let SYSTEM_STATS = {
+    cpu: 0,
+    ram: { total: 0, used: 0, free: 0, percent: 0 },
+    network: { up: 0, down: 0 },
+    uptime: 0
+};
+
+const log = async (message, type = 'INFO') => {
+    const timestamp = new Date().toISOString();
+    const logLine = `[${timestamp}] [${type}] ${message}\n`;
+    console.log(logLine.trim());
+    try { await fs.appendFile(LOG_FILE, logLine); } catch (e) {}
+};
+
+const hasFreeSpace = async (dirPath) => {
+    try {
+        const disk = await checkDiskSpace(dirPath);
+        return disk.free > MIN_FREE_SPACE_BYTES;
+    } catch (e) { return true; }
+};
+
+const cleanOldTempFiles = async () => {
+    try {
+        const files = await fs.readdir(TEMP_DIR);
+        const now = Date.now();
+        const ONE_DAY = 24 * 60 * 60 * 1000;
+        for (const file of files) {
+            const filePath = path.join(TEMP_DIR, file);
+            try {
+                const stats = await fs.stat(filePath);
+                if (now - stats.mtimeMs > ONE_DAY) await fs.unlink(filePath);
+            } catch (err) {}
+        }
+    } catch (e) {}
+};
+
+const getCpuUsage = () => {
+    const cpus = os.cpus();
+    let user = 0, nice = 0, sys = 0, idle = 0, irq = 0;
+    for(let cpu of cpus) {
+        user += cpu.times.user; nice += cpu.times.nice; sys += cpu.times.sys; idle += cpu.times.idle; irq += cpu.times.irq;
+    }
+    const total = user + nice + sys + idle + irq; return { total, idle };
+};
+
+const getNetworkStats = async () => {
+    try {
+        const data = await fs.readFile('/proc/net/dev', 'utf8');
+        const lines = data.split('\n');
+        let rx = 0; let tx = 0; 
+        for (let i = 2; i < lines.length; i++) {
+            const line = lines[i].trim();
+            if (!line) continue;
+            const parts = line.split(/\s+/);
+            const interfaceName = parts[0].replace(':', '');
+            if (interfaceName !== 'lo') { rx += parseInt(parts[1]); tx += parseInt(parts[9]); }
+        }
+        return { rx, tx };
+    } catch (e) { return { rx: 0, tx: 0 }; }
+};
+
+const getLocalIp = () => {
+    const interfaces = os.networkInterfaces();
+    for (const name of Object.keys(interfaces)) {
+        for (const iface of interfaces[name]) {
+            if (!iface.internal && iface.family === 'IPv4') return iface.address;
+        }
+    }
+    return 'localhost';
+};
+
+let prevCpuInfo = getCpuUsage();
+let prevNetInfo = { rx: 0, tx: 0, timestamp: Date.now() };
+getNetworkStats().then(stats => prevNetInfo = { ...stats, timestamp: Date.now() });
+
+setInterval(async () => {
+    const totalMem = os.totalmem(); const freeMem = os.freemem();
+    SYSTEM_STATS.ram = { total: totalMem, free: freeMem, used: totalMem - freeMem, percent: ((totalMem - freeMem) / totalMem) * 100 };
+    const currCpuInfo = getCpuUsage();
+    const totalDiff = currCpuInfo.total - prevCpuInfo.total; const idleDiff = currCpuInfo.idle - prevCpuInfo.idle;
+    SYSTEM_STATS.cpu = totalDiff > 0 ? ((totalDiff - idleDiff) / totalDiff) * 100 : 0;
+    prevCpuInfo = currCpuInfo;
+    const currNetInfo = await getNetworkStats(); const now = Date.now(); const timeDiff = (now - prevNetInfo.timestamp) / 1000; 
+    if (timeDiff > 0) { SYSTEM_STATS.network = { down: Math.max(0, (currNetInfo.rx - prevNetInfo.rx) / timeDiff), up: Math.max(0, (currNetInfo.tx - prevNetInfo.tx) / timeDiff) }; }
+    prevNetInfo = { ...currNetInfo, timestamp: now };
+    SYSTEM_STATS.uptime = os.uptime();
+}, 2000);
+
+const hashPassword = (password) => {
+    return crypto.pbkdf2Sync(password, 'salt', 1000, 64, 'sha512').toString('hex');
+};
+
+const generateApiKey = () => crypto.randomBytes(32).toString('hex');
+const hashApiKey = (key) => crypto.createHash('sha256').update(key).digest('hex');
+
+const verifyNodeKey = async (nodeId, secret) => {
+    if (!nodeId || !secret || !db) return false;
+    const node = await db.get("SELECT 1 FROM nodes WHERE id = ? AND api_key = ? AND revoked = 0", [nodeId, secret]);
+    return !!node;
+};
+
+const getSetting = async (key, defaultValue) => {
+    if (!db) return defaultValue;
+    const row = await db.get("SELECT value FROM settings WHERE key = ?", key);
+    return row ? row.value : defaultValue;
+};
+
+const setSetting = async (key, value) => {
+    await db.run("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [key, value]);
+};
+
+const generateNodeId = (name) => {
+    const slug = (name || 'node').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'node';
+    return `${slug}_${crypto.randomBytes(3).toString('hex')}`;
+};
+
+const initDB = async () => {
+    try {
+        if (!existsSync(HIDDEN_DATA_FOLDER)) await fs.mkdir(HIDDEN_DATA_FOLDER, { recursive: true });
+        if (!existsSync(THUMB_FOLDER)) await fs.mkdir(THUMB_FOLDER, { recursive: true });
+        
+        db = await open({ filename: DB_PATH, driver: sqlite3.Database });
+        await db.run('PRAGMA journal_mode = WAL;');
+        
+        await db.exec(`
+            CREATE TABLE IF NOT EXISTS media (path TEXT PRIMARY KEY, filename TEXT, title TEXT, type TEXT, series_name TEXT, season INTEGER, episode INTEGER, size INTEGER, duration REAL, poster TEXT, created_at TEXT);
+            CREATE TABLE IF NOT EXISTS history (user_email TEXT, media_path TEXT, progress REAL, duration REAL, last_watched TEXT, PRIMARY KEY (user_email, media_path));
+            CREATE TABLE IF NOT EXISTS telegram_files (message_id INTEGER PRIMARY KEY, filename TEXT, size INTEGER, status TEXT DEFAULT 'discovered', date_posted TEXT, downloaded_size INTEGER DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, role TEXT, last_active INTEGER, ip TEXT, location TEXT, username TEXT);
+        `);
+
+        await db.exec(`
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                username TEXT UNIQUE, 
+                password TEXT, 
+                role TEXT DEFAULT 'public', 
+                status TEXT DEFAULT 'pending', 
+                created_at TEXT
+            );
+        `);
+        
+        await db.exec(`
+            CREATE TABLE IF NOT EXISTS activity_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT,
+                action TEXT,
+                details TEXT,
+                ip TEXT,
+                timestamp TEXT
+            );
+        `);
+
+        await db.exec(`
+            CREATE TABLE IF NOT EXISTS torrents (
+                hash TEXT PRIMARY KEY,
+                magnet TEXT,
+                name TEXT,
+                added_at TEXT,
+                status TEXT DEFAULT 'downloading', -- downloading, paused, completed
+                save_path TEXT,
+                is_private INTEGER DEFAULT 0
+            );
+        `);
+
+        await db.exec(`
+            CREATE TABLE IF NOT EXISTS nodes (
+                id TEXT PRIMARY KEY,
+                name TEXT,
+                roles TEXT,
+                api_key TEXT,
+                created_at TEXT,
+                last_seen_at TEXT,
+                revoked INTEGER DEFAULT 0
+            );
+        `);
+
+        await db.exec(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);`);
+
+        const adminUser = await db.get("SELECT id, role FROM users WHERE username = 'admin'");
+        if (adminUser) {
+            if (adminUser.role !== 'super_admin') {
+                console.log("🔒 Upgrading existing 'admin' user to Super Admin...");
+                await db.run("UPDATE users SET role = 'super_admin' WHERE username = 'admin'");
+            }
+        } else {
+            console.log("🔒 Creating System Super Admin (admin / admin)...");
+            const hash = hashPassword("admin");
+            await db.run(
+                "INSERT INTO users (username, password, role, status, created_at) VALUES (?, ?, 'super_admin', 'approved', ?)", 
+                ["admin", hash, new Date().toISOString()]
+            );
+        }
+
+        await db.run("DELETE FROM users WHERE status = 'rejected'");
+
+        const migrations = [
+            "ALTER TABLE media ADD COLUMN transcode_status TEXT DEFAULT 'completed'",
+            "ALTER TABLE media ADD COLUMN duration REAL",
+            "ALTER TABLE media ADD COLUMN poster TEXT",
+            "ALTER TABLE media ADD COLUMN is_archived INTEGER DEFAULT 0",
+            "ALTER TABLE media ADD COLUMN is_private INTEGER DEFAULT 0", // 👈 CRITICAL FOR VAULT
+            "ALTER TABLE sessions ADD COLUMN ip TEXT",
+            "ALTER TABLE sessions ADD COLUMN location TEXT",
+            "ALTER TABLE sessions ADD COLUMN username TEXT",    
+            "ALTER TABLE sessions ADD COLUMN device TEXT",
+            "ALTER TABLE sessions ADD COLUMN device_type TEXT",
+
+            "ALTER TABLE media ADD COLUMN owner_username TEXT DEFAULT NULL",
+            "ALTER TABLE torrents ADD COLUMN owner_username TEXT DEFAULT NULL",
+
+            "ALTER TABLE users ADD COLUMN kunji_sub TEXT DEFAULT NULL",
+            "ALTER TABLE nodes ADD COLUMN owner_user_id INTEGER DEFAULT NULL"
+        ];
+
+        for (const sql of migrations) {
+            try { await db.run(sql); } catch(e) { /* Ignore "column exists" errors */ }
+        }
+
+        // SQLite's ADD COLUMN can't express uniqueness itself — a separate index, so two
+        // accounts can never collide on the same kunji identity (or a re-link silently overwrite).
+        await db.run("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_kunji_sub ON users(kunji_sub) WHERE kunji_sub IS NOT NULL");
+
+        await db.run("UPDATE media SET transcode_status = 'pending' WHERE transcode_status = 'processing' OR transcode_status = 'remote_processing' OR transcode_status = 'failed'");
+        await db.run("UPDATE media SET owner_username = 'admin' WHERE is_private = 1 AND owner_username IS NULL");
+    } catch (e) { await log(`DB Init Failed: ${e.message}`, 'FATAL'); }
+};
+
+const logActivity = async (username, action, details, ip) => {
+    if (!db) return;
+    try {
+        await db.run(
+            "INSERT INTO activity_logs (username, action, details, ip, timestamp) VALUES (?, ?, ?, ?, ?)",
+            [username, action, details, ip, new Date().toISOString()]
+        );
+    } catch (e) { console.error("Log failed:", e.message); }
+};
+
+const verifyToken = async (req, res, next) => {
+    const authHeader = req.headers.authorization;
+    const token = authHeader && authHeader.split('Bearer ')[1] || req.query.token;
+
+    if (!token) return res.status(401).json({ error: 'Unauthorized' });
+    if (!db) await initDB();
+
+    try {
+        const session = await db.get("SELECT * FROM sessions WHERE token = ?", token);
+        if (!session) return res.status(401).json({ error: 'Unauthorized' });
+
+        await db.run("UPDATE sessions SET last_active = ? WHERE token = ?", [Date.now(), token]);
+        const userRow = await db.get("SELECT id FROM users WHERE username = ?", session.username);
+        req.user = { id: userRow?.id ?? null, role: session.role, username: session.username };
+
+        next();
+    } catch (e) {
+        return res.status(500).json({ error: 'Auth Error' });
+    }
+};
+
+const initSecretsManager = async () => {
+    if (!isFirebaseActive) return;
+    const dbRef = admin.database().ref('server_secrets');
+
+    const snapshot = await dbRef.once('value');
+    if (!snapshot.exists()) {
+        console.log("🔒 Secrets not found in DB. Uploading defaults...");
+        await dbRef.set(DEFAULT_CONFIG);
+        CONFIG = { ...DEFAULT_CONFIG };
+    } else {
+        console.log("🔓 Secrets loaded from Firebase.");
+        const data = snapshot.val();
+        CONFIG = { ...DEFAULT_CONFIG, ...data };
+    }
+};
+
+const checkNasHealth = async () => {
+    if (KNOWN_NAS_NODES.size === 0) return;
+
+    const checks = Array.from(KNOWN_NAS_NODES.values()).map(async (node) => {
+        try {
+            const res = await axios.get(`${node.url}/stats`, {
+                timeout: 2000,
+                headers: { 'Authorization': `Bearer ${node.apiKey}` }
+            });
+
+            node.stats = res.data; 
+            node.isReachable = true;
+            node.lastSeen = Date.now();
+        } catch (e) {
+            node.isReachable = false;
+            node.stats = null; 
+        }
+    });
+
+    await Promise.all(checks);
+};
+
+const getBestNasNode = (requiredBytes) => {
+    const nodes = Array.from(KNOWN_NAS_NODES.values());
+    
+    const candidates = nodes.filter(n => {
+        const free = n.stats?.disk?.free || 0;
+        return free > requiredBytes + (1024*1024*1024); // +1GB Buffer
+    });
+
+    if (candidates.length === 0) return null;
+
+    candidates.sort((a, b) => b.stats.disk.free - a.stats.disk.free);
+
+    return candidates[0];
+};
+
+// A node that's both a reachable NAS (with room) AND a reachable, idle transcoder can
+// receive a Telegram download straight into its own storage and transcode it in place —
+// no local disk on the main server, no extra network hop for the transcode step.
+const getNodeForDirectDownload = (requiredBytes) => {
+    const candidates = [];
+    for (const [id, nasNode] of KNOWN_NAS_NODES.entries()) {
+        const transcoderNode = KNOWN_NODES.get(id);
+        if (!transcoderNode || !transcoderNode.isReachable || transcoderNode.activeJob !== null) continue;
+        const free = nasNode.stats?.disk?.free || 0;
+        if (free <= requiredBytes + (1024 * 1024 * 1024)) continue; // +1GB buffer
+        candidates.push({ id, nasNode, transcoderNode, free });
+    }
+    if (candidates.length === 0) return null;
+    candidates.sort((a, b) => b.free - a.free);
+    return candidates[0];
+};
+
+let isArchiving = false;
+
+const runAutoArchiver = async () => {
+    if (isDownloading || isAssigningJob || isArchiving) return;
+
+    try {
+        const disk = await checkDiskSpace(MEDIA_ROOT);
+        const TRIGGER_THRESHOLD = MIN_FREE_SPACE_BYTES; 
+
+        if (disk.free > TRIGGER_THRESHOLD) return; 
+
+        isArchiving = true; 
+
+        log(`⚠️ Low Disk Space detected. Finding candidate to archive...`, 'WARN');
+
+        const candidate = await db.get(`
+            SELECT m.*, h.last_watched 
+            FROM media m 
+            LEFT JOIN history h ON m.path = h.media_path 
+            WHERE m.is_archived = 0 
+            AND m.is_private = 0 
+            AND m.transcode_status = 'completed'
+            ORDER BY COALESCE(h.last_watched, m.created_at) ASC 
+            LIMIT 1
+        `);
+
+        if (!candidate) {
+            isArchiving = false; 
+            return;
+        }
+
+        if (!existsSync(candidate.path)) {
+            log(`❌ Candidate file missing: ${candidate.path}. Cleaning DB.`, 'ERROR');
+            await db.run("DELETE FROM media WHERE path = ?", candidate.path);
+            isArchiving = false;
+            return;
+        }
+
+        const targetNas = getBestNasNode(candidate.size);
+        
+        if (!targetNas) {
+            log(`❌ No suitable NAS node found (Offline or Full).`, 'ERROR');
+            isArchiving = false;
+            return;
+        }
+
+        log(`📦 Archiving via System cURL: ${candidate.filename} -> ${targetNas.id}`);
+
+        const uploadUrl = `${targetNas.url}/archive`;
+
+        await new Promise((resolve, reject) => {
+            const child = spawn('curl', [
+                '-s',
+                '--connect-timeout', '10',
+                '--max-time', '14400',
+                '-H', `Authorization: Bearer ${targetNas.apiKey}`,
+                '-F', `file=@${candidate.path}`,
+                uploadUrl
+            ]);
+
+            let responseData = '';
+            
+            child.stdout.on('data', (d) => { responseData += d.toString(); });
+            child.stderr.on('data', (d) => { console.error(`[cURL] ${d.toString()}`); });
+            child.on('close', (code) => {
+                if (code !== 0) return reject(new Error(`cURL process exited with code ${code}`));
+                try {
+                    const json = JSON.parse(responseData);
+                    if (json.success) resolve();
+                    else reject(new Error(json.error || "Remote Server Error"));
+                } catch (e) {
+                    reject(new Error("Invalid JSON response from NAS"));
+                }
+            });
+        });
+
+        await fs.unlink(candidate.path);
+        
+        const newPath = `nas://${targetNas.id}/${candidate.filename}`;
+        
+        await db.run("UPDATE media SET path = ?, is_archived = 1 WHERE path = ?", [newPath, candidate.path]);
+        await db.run("UPDATE history SET media_path = ? WHERE media_path = ?", [newPath, candidate.path]);
+        
+        log(`✅ Archived Successfully to ${targetNas.id}`);
+
+    } catch (e) {
+        log(`❌ Archive Failed: ${e.message}`, 'ERROR');
+    } finally {
+        isArchiving = false; 
+    }
+};
+
+setInterval(runAutoArchiver, 60000);
+
+const checkSingleNode = async (node) => {
+    node.statusDirect = false;
+    node.statusTunnel = false;
+
+    const updateStats = (data) => {
+        node.hardware = data.hardware;
+        node.stats = { 
+            cpu: data.cpu,
+            ram: data.ram,
+            network: data.network,
+            uptime: data.uptime
+        };
+        if (data.busy) {
+            // If worker is busy but server doesn't know why, mark as External
+            if (!node.activeJob) node.activeJob = "External Job"; 
+        } else {
+            // FIX: If worker reports NOT busy, clear the job immediately
+            // regardless of what the server thought it was doing.
+            node.activeJob = null;
+        }
+    };
+
+    if (node.directIp && node.directPort) {
+        try {
+            const res = await axios.get(`http://${node.directIp}:${node.directPort}/stats`, {
+                timeout: 2000,
+                headers: { 'Authorization': `Bearer ${node.apiKey}` }
+            });
+
+            updateStats(res.data);
+            node.activeUrl = `http://${node.directIp}:${node.directPort}`;
+            node.statusDirect = true;
+            node.isReachable = true;
+            node.failedStrikes = 0;
+            return;
+        } catch (e) {/*console.log(`${node.directIp}: ${e.message}`);*/}
+    }
+
+    if (node.url) {
+        try {
+            const res = await axios.get(`${node.url}/stats`, {
+                timeout: 4000,
+                headers: { 'Authorization': `Bearer ${node.apiKey}` }
+            });
+            
+            updateStats(res.data); 
+            node.activeUrl = node.url;
+            node.statusTunnel = true;
+            node.isReachable = true;
+            node.failedStrikes = 0;
+            return;
+        } catch (e) {/*console.log(e.message);*/}
+    }
+
+    node.isReachable = false;
+    node.failedStrikes++;
+};
+
+// 👇 Single discovery listener for merged nodes (roles: transcoder / nas / both).
+// Nodes write once to Firebase `nodes/<id>`; this fans that out into whichever
+// of KNOWN_NODES / KNOWN_NAS_NODES apply, so the existing job-allocation and
+// NAS-archival logic (which read those two maps separately) needs no changes.
+const initNodeDiscoveryListener = () => {
+    if (!isFirebaseActive) return;
+    const fbDb = admin.database();
+    const ref = fbDb.ref('nodes');
+
+    ref.on('value', async (snapshot) => {
+        const data = snapshot.val();
+        if (!data) return;
+
+        for (const node of Object.values(data)) {
+            const roles = Array.isArray(node.roles) ? node.roles : String(node.roles || '').split(',').filter(Boolean);
+            const isTranscoder = roles.includes('transcoder');
+            const isNas = roles.includes('nas');
+            if (!isTranscoder && !isNas) continue;
+
+            let apiKey = KNOWN_NODES.get(node.id)?.apiKey || KNOWN_NAS_NODES.get(node.id)?.apiKey;
+            if (!apiKey) {
+                if (!db) continue;
+                const row = await db.get("SELECT api_key FROM nodes WHERE id = ? AND revoked = 0", node.id);
+                if (!row) continue; // Not an admin-registered (or revoked) node — don't trust it.
+                apiKey = row.api_key;
+            }
+
+            if (isTranscoder) {
+                if (!KNOWN_NODES.has(node.id)) {
+                    KNOWN_NODES.set(node.id, {
+                        id: node.id, url: node.url, directIp: node.directIp, directPort: node.directPort,
+                        lastUpdated: node.lastUpdated, hardware: node.hardware, apiKey,
+                        isReachable: false, activeUrl: null, failedStrikes: 0, activeJob: null,
+                        statusDirect: false, statusTunnel: false
+                    });
+                    console.log(`🆕 Found New Worker: ${node.id}`);
+                    checkSingleNode(KNOWN_NODES.get(node.id));
+                } else {
+                    const existing = KNOWN_NODES.get(node.id);
+                    existing.url = node.url; existing.directIp = node.directIp; existing.directPort = node.directPort;
+                    existing.lastUpdated = node.lastUpdated; existing.hardware = node.hardware; existing.apiKey = apiKey;
+                }
+            }
+
+            if (isNas) {
+                if (!KNOWN_NAS_NODES.has(node.id)) {
+                    console.log(`🆕 Found NAS Node: ${node.id} at ${node.ip}`);
+                    KNOWN_NAS_NODES.set(node.id, { ...node, apiKey, stats: null, isReachable: false });
+                } else {
+                    const existing = KNOWN_NAS_NODES.get(node.id);
+                    existing.url = node.url; existing.ip = node.ip; existing.port = node.port; existing.apiKey = apiKey;
+                }
+            }
+        }
+    });
+};
+
+const startNodeHealthCheck = () => {
+    setInterval(async () => {
+        if (KNOWN_NODES.size === 0) return;
+        const checks = Array.from(KNOWN_NODES.values()).map(node => checkSingleNode(node));
+        await Promise.all(checks);
+    }, 2000);
+};
+
+const getAvailableTranscoder = async () => {
+    console.log(`🔍 [Job Allocator] Starting search. Total Known Nodes: ${KNOWN_NODES.size}`);
+
+    if (KNOWN_NODES.size === 0) {
+        console.log("⚠️ [Job Allocator] No nodes known to server.");
+        return null;
+    }
+
+    const candidates = [];
+    for (const node of KNOWN_NODES.values()) {
+        const isReady = n => n.isReachable && n.activeUrl && n.activeJob === null;
+        
+        if (isReady(node)) {
+            candidates.push(node);
+        } else {
+            const reasons = [];
+            if (!node.isReachable) reasons.push("Unreachable");
+            if (!node.activeUrl) reasons.push("No URL");
+            if (node.activeJob !== null) reasons.push(`Busy locally (Job: ${node.activeJob})`);
+            console.log(`   🚫 Skipping Node [${node.id}]: ${reasons.join(', ')}`);
+        }
+    }
+
+    if (candidates.length === 0) {
+        console.log("⚠️ [Job Allocator] No candidates passed local filters.");
+        return null;
+    }
+
+    console.log(`   ✅ Candidates found: ${candidates.map(c => c.id).join(', ')}`);
+
+    const shuffled = candidates.sort(() => 0.5 - Math.random());
+    
+    for (const node of shuffled) {
+        console.log(`   👉 Probing Node [${node.id}] at ${node.activeUrl}/status...`);
+        try {
+            const res = await axios.get(`${node.activeUrl}/status`, {
+                timeout: 2000,
+                headers: { 'Authorization': `Bearer ${node.apiKey}` }
+            });
+            
+            console.log(`      ↩️ Response from [${node.id}]: Online=${res.data.online}, Busy=${res.data.busy}`);
+
+            if (res.data.online && !res.data.busy) {
+                console.log(`      🎉 SELECTED NODE: ${node.id}`);
+                return node;
+            }
+        } catch (e) {
+            console.log(`      ❌ Connection Failed to [${node.id}]: ${e.message}`);
+        }
+    }
+    console.log("❌ [Job Allocator] All candidates failed probe check.");
+    return null;
+};
+
+const runLocalRemux = async (inputPath, outputPath) => {
+    const metadata = await new Promise((resolve, reject) => {
+        ffmpeg.ffprobe(inputPath, (err, meta) => {
+            if (err) reject(err);
+            else resolve(meta);
+        });
+    });
+
+    const SAFE_SUBTITLES = ['mov_text', 'subrip', 'ass', 'ssa', 'webvtt'];
+
+    const outputOptions = [
+        '-map 0:v:0',           // 1st Video
+        '-map 0:a',             // All Audio
+        '-c:v copy',            // Video Copy
+        '-c:a copy',            // Audio Copy
+        '-movflags +faststart'
+    ];
+
+    let hasSafeSubtitles = false;
+
+    for (const stream of metadata.streams) {
+        if (stream.codec_type === 'subtitle') {
+            if (SAFE_SUBTITLES.includes(stream.codec_name)) {
+                console.log(`   ✅ [Local Remux] Keeping Subtitle #${stream.index} (${stream.codec_name})`);
+                outputOptions.push(`-map 0:${stream.index}`);
+                hasSafeSubtitles = true;
+            } else {
+                console.log(`   🚫 [Local Remux] Dropping Subtitle #${stream.index} (${stream.codec_name}) - Not supported in MP4`);
+            }
+        }
+    }
+
+    if (hasSafeSubtitles) {
+        outputOptions.push('-c:s mov_text');
+    }
+
+    return new Promise((resolve, reject) => {
+        ffmpeg(inputPath)
+            .output(outputPath)
+            .outputOptions(outputOptions)
+            .on('end', resolve)
+            .on('error', reject)
+            .run();
+    });
+};
+
+const checkTranscodeQueue = async () => {
+    if (isAssigningJob) { console.log("Skipping queue check: already assigning job"); return; }
+    if (!db) return;
+
+    let job = null;
+    try {
+        isAssigningJob = true;
+        // 👇 REMOVE "AND is_private = 0"
+        // If you want to transcode private files too so they play in the browser
+        job = await db.get("SELECT * FROM media WHERE transcode_status = 'pending' AND is_private = 0 ORDER BY created_at ASC LIMIT 1");
+        if (!job) return;
+
+        if (job.path.startsWith('nas://')) {
+            // Metadata + transcode-need were already decided when this file was registered
+            // (processDirectToNodeFile) — transcode it in place, on the same node it already
+            // lives on, rather than pulling it somewhere else first.
+            const parts = job.path.replace('nas://', '').split('/');
+            const nodeId = parts[0];
+            const filename = parts.slice(1).join('/');
+            const workerNode = KNOWN_NODES.get(nodeId);
+
+            if (!workerNode || !workerNode.isReachable || !workerNode.activeUrl || workerNode.activeJob !== null) {
+                console.log(`⏳ Node ${nodeId} not ready for in-place transcode of ${job.filename} yet, will retry.`);
+                return;
+            }
+
+            workerNode.activeJob = job.path;
+            const workerUrl = workerNode.activeUrl;
+
+            await log(`🚀 Delegating in-place transcode to ${workerNode.id}: ${job.filename}`);
+            await db.run("UPDATE media SET transcode_status = 'remote_processing' WHERE path = ?", job.path);
+
+            const myConfig = lastKnownConfig || { url: `http://${getLocalIp()}:${PORT}` };
+            const payload = {
+                fileId: Buffer.from(job.path).toString('base64'),
+                nodeId: workerNode.id,
+                localFile: filename,
+                callbackUrl: `${myConfig.url}/api/internal/transcode-complete`,
+                progressUrl: `${myConfig.url}/api/internal/progress`,
+                secret: workerNode.apiKey
+            };
+
+            try {
+                await axios.post(`${workerUrl}/job`, payload, { headers: { 'Authorization': `Bearer ${workerNode.apiKey}` } });
+                await log(`✅ In-place job accepted by ${workerNode.id}`);
+            } catch (postError) {
+                workerNode.activeJob = null;
+                throw postError;
+            }
+            return;
+        }
+
+        console.log(`🔍 Analyzing Job Locally: ${job.filename}`);
+        const metadata = await new Promise((resolve) => {
+            ffmpeg.ffprobe(job.path, (err, meta) => resolve(meta || null));
+        });
+
+        if (metadata) {
+            const video = metadata.streams.find(s => s.codec_type === 'video');
+            const audio = metadata.streams.find(s => s.codec_type === 'audio');
+            
+            const isVideoH264 = video && video.codec_name === 'h264';
+            const isAudioAAC = audio && audio.codec_name === 'aac';
+            const isMp4 = path.extname(job.path).toLowerCase() === '.mp4';
+
+            if (isVideoH264 && isAudioAAC && isMp4) {
+                console.log(`✅ File is already H264/AAC/MP4. Marking complete instantly.`);
+                await db.run("UPDATE media SET transcode_status = 'completed' WHERE path = ?", job.path);
+                return; 
+            }
+
+            if (isVideoH264 && isAudioAAC) {
+                console.log(`⚡ Codecs match (H264/AAC). Running local remux to save bandwidth...`);
+                
+                await db.run("UPDATE media SET transcode_status = 'processing' WHERE path = ?", job.path);
+                
+                const tempFilename = `remux_${Date.now()}_${path.basename(job.path, path.extname(job.path))}.mp4`;
+                const tempOutput = path.join(TEMP_DIR, tempFilename);
+
+                const finalPath = job.path.replace(path.extname(job.path), '.mp4');
+
+                try {
+                    await runLocalRemux(job.path, tempOutput);
+                    
+                    if (existsSync(job.path) && job.path !== finalPath) {
+                        await fs.unlink(job.path);
+                    }
+
+                    await fs.rename(tempOutput, finalPath);
+
+                    await db.run("UPDATE media SET path = ?, filename = ?, transcode_status = 'completed' WHERE path = ?", 
+                        [finalPath, path.basename(finalPath), job.path]);
+                    
+                    console.log(`✅ Local Remux Complete: ${path.basename(finalPath)}`);
+                    return; 
+                } catch (remuxErr) {
+                    console.error("Local remux failed, falling back to remote worker:", remuxErr.message);
+                }
+            } else {
+                console.log(`⚠️ File requires full transcoding (codecs ${video.codec_name} ${audio.codec_name} do not match). Delegating to worker.`);
+            }
+
+        }
+
+        const workerNode = await getAvailableTranscoder();
+        if (!workerNode) {console.log("No available transcoder"); return; }
+
+        workerNode.activeJob = job.path; 
+        const workerUrl = workerNode.activeUrl;
+
+        await log(`🚀 Delegating Job to ${workerNode.id}: ${job.filename}`);
+        await db.run("UPDATE media SET transcode_status = 'remote_processing' WHERE path = ?", job.path);
+
+        const myConfig = lastKnownConfig || { url: `http://${getLocalIp()}:${PORT}` };
+
+        const payload = {
+            fileId: Buffer.from(job.path).toString('base64'),
+            nodeId: workerNode.id,
+            downloadUrl: `${myConfig.url}/api/internal/download?path=${encodeURIComponent(job.path)}&nodeId=${encodeURIComponent(workerNode.id)}&secret=${workerNode.apiKey}`,
+            callbackUrl: `${myConfig.url}/api/internal/upload-result`,
+            progressUrl: `${myConfig.url}/api/internal/progress`,
+            secret: workerNode.apiKey
+        };
+
+        try {
+            await axios.post(`${workerUrl}/job`, payload, { headers: { 'Authorization': `Bearer ${workerNode.apiKey}` } });
+            await log(`✅ Job Accepted by ${workerNode.id}`);
+        } catch (postError) {
+            workerNode.activeJob = null; 
+            throw postError; 
+        }
+    } catch (e) {
+        if (e.response && e.response.status !== 503) await log(`❌ Worker refused job: ${e.message}`, 'ERROR');
+        if (job) await db.run("UPDATE media SET transcode_status = 'pending' WHERE path = ?", job.path);
+    } finally {
+        isAssigningJob = false;
+    }
+};
+
+const parseFilename = (filename) => {
+    const seriesMatch = filename.match(/(.+?)[ .][sS](\d{1,2})[eE](\d{1,2})/i);
+    if (seriesMatch) return { type: 'series', title: filename, series_name: seriesMatch[1].replace(/\./g, ' ').trim(), season: parseInt(seriesMatch[2]), episode: parseInt(seriesMatch[3]) };
+    const titleClean = filename.replace(/\.(mp4|mkv|avi|mov|webm|m4v)$/i, '').replace(/\./g, ' ');
+    return { type: 'movie', title: titleClean };
+};
+
+const extractMetadata = (filePath) => {
+    return new Promise((resolve) => {
+        const thumbName = path.basename(filePath, path.extname(filePath)) + '.jpg';
+        const thumbPath = path.join(THUMB_FOLDER, thumbName);
+        ffmpeg.ffprobe(filePath, (err, metadata) => {
+            const duration = !err && metadata ? metadata.format.duration : 0;
+            const hasH264 = metadata && metadata.streams.some(s => s.codec_name === 'h264');
+            const hasAAC = metadata && metadata.streams.some(s => s.codec_name === 'aac');
+            const needsTranscode = !(hasH264 && hasAAC && path.extname(filePath) === '.mp4');
+            if (existsSync(thumbPath)) resolve({ duration, poster: thumbName, needsTranscode });
+            else ffmpeg(filePath).on('error', () => resolve({ duration: 0, poster: null, needsTranscode }))
+                .on('end', () => resolve({ duration, poster: thumbName, needsTranscode }))
+                .screenshots({ count: 1, timestamps: ['10%'], folder: THUMB_FOLDER, filename: thumbName, size: '320x?' });
+        });
+    });
+};
+
+const processDownloadedFile = async (tempPath, filename, options = {}) => {
+    const { isPrivate = 0, owner = null } = options;
+    try {
+        let rootFolder;
+        
+        if (isPrivate && owner) {
+            rootFolder = path.join(PRIVATE_ROOT, owner); // 📂 /StreamMedia_Private/username/
+        } else if (isPrivate) {
+            rootFolder = PRIVATE_ROOT; // Fallback for system/admin files
+        } else {
+            rootFolder = MEDIA_ROOT;
+        }
+
+        const targetDir = path.join(rootFolder, 'Movies'); 
+        await fs.mkdir(targetDir, { recursive: true });
+
+        const finalPath = path.join(targetDir, filename);
+        if (existsSync(finalPath)) return;
+
+        await fs.rename(tempPath, finalPath).catch(async () => { await fs.copyFile(tempPath, finalPath); await fs.unlink(tempPath); });
+
+        const stats = await fs.stat(finalPath);
+        const { duration, poster, needsTranscode } = await extractMetadata(finalPath);
+        const meta = parseFilename(filename);
+        const status = (needsTranscode && !isPrivate) ? 'pending' : 'completed';
+
+        await db.run(`INSERT OR IGNORE INTO media 
+            (path, filename, title, type, series_name, season, episode, size, duration, poster, created_at, transcode_status, is_private, owner_username) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, 
+            [finalPath, filename, meta.title, meta.type, meta.series_name, meta.season, meta.episode, stats.size, duration, poster, stats.birthtime.toISOString(), status, isPrivate, owner]);
+
+        await log(`✅ Auto-Imported: ${filename}`);
+        checkTranscodeQueue();
+    } catch (e) { await log(`❌ Processing Failed: ${e.message}`, 'ERROR'); }
+};
+
+// Same as extractMetadata, but probes/screenshots a file that already lives on a NAS
+// node (served over HTTP with its own api key) instead of a local path.
+const extractMetadataRemote = (fileUrl, apiKey, thumbName) => {
+    return new Promise((resolve) => {
+        const thumbPath = path.join(THUMB_FOLDER, thumbName);
+        const probeCmd = `ffprobe -v quiet -print_format json -show_streams -show_format -headers "Authorization: Bearer ${apiKey}" "${fileUrl}"`;
+
+        exec(probeCmd, (err, stdout) => {
+            let duration = 0, needsTranscode = true;
+            try {
+                const metadata = JSON.parse(stdout);
+                duration = parseFloat(metadata.format?.duration) || 0;
+                const hasH264 = metadata.streams?.some(s => s.codec_name === 'h264');
+                const hasAAC = metadata.streams?.some(s => s.codec_name === 'aac');
+                const isMp4 = /\.mp4($|\?)/i.test(fileUrl);
+                needsTranscode = !(hasH264 && hasAAC && isMp4);
+            } catch (e) {}
+
+            if (existsSync(thumbPath)) return resolve({ duration, poster: thumbName, needsTranscode });
+
+            ffmpeg(fileUrl)
+                .inputOptions(['-headers', `Authorization: Bearer ${apiKey}\r\n`])
+                .on('error', () => resolve({ duration, poster: null, needsTranscode }))
+                .on('end', () => resolve({ duration, poster: thumbName, needsTranscode }))
+                .screenshots({ count: 1, timestamps: ['10%'], folder: THUMB_FOLDER, filename: thumbName, size: '320x?' });
+        });
+    });
+};
+
+// A Telegram file that was streamed straight into a node's storage (never touched this
+// server's disk) — register it as already-archived on that node and let the normal
+// transcode queue pick it up (checkTranscodeQueue routes nas:// jobs back to the same node).
+const processDirectToNodeFile = async (nodeId, nasNode, filename, size, options = {}) => {
+    const { isPrivate = 0, owner = null } = options;
+    try {
+        const nasPath = `nas://${nodeId}/${filename}`;
+        const existing = await db.get("SELECT 1 FROM media WHERE path = ?", nasPath);
+        if (existing) return;
+
+        const fileUrl = `${nasNode.url}/file/${encodeURIComponent(filename)}`;
+        const thumbName = path.basename(filename, path.extname(filename)) + '.jpg';
+        const { duration, poster, needsTranscode } = await extractMetadataRemote(fileUrl, nasNode.apiKey, thumbName);
+        const meta = parseFilename(filename);
+        const status = (needsTranscode && !isPrivate) ? 'pending' : 'completed';
+
+        await db.run(`INSERT OR IGNORE INTO media
+            (path, filename, title, type, series_name, season, episode, size, duration, poster, created_at, transcode_status, is_private, owner_username, is_archived)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+            [nasPath, filename, meta.title, meta.type, meta.series_name, meta.season, meta.episode, size, duration, poster, new Date().toISOString(), status, isPrivate, owner]);
+
+        await log(`✅ Auto-Imported directly to node ${nodeId}: ${filename}`);
+        checkTranscodeQueue();
+    } catch (e) {
+        await log(`❌ Failed to register direct-to-node file: ${e.message}`, 'ERROR');
+    }
+};
+
+const extractFileInfo = (message) => {
+    let filename = "unknown.mp4"; let size = 0;
+    if (message.media && message.media.document) {
+        if (message.media.document.size) size = Number(message.media.document.size);
+        if (message.media.document.attributes) { for (const attr of message.media.document.attributes) { if (attr.fileName) { filename = attr.fileName; break; } } }
+    }
+    return { filename, size };
+};
+
+// Pulls the Telegram file chunk-by-chunk (bounded memory, never touches this server's
+// disk) and pipes it straight into a multipart upload to the node's own /archive route.
+const streamTelegramToNode = async (message, filename, size, nodeInfo, onProgress) => {
+    const { nasNode } = nodeInfo;
+    const passthrough = new PassThrough();
+    const form = new FormData();
+    form.append('file', passthrough, { filename, knownLength: size });
+
+    const uploadPromise = axios.post(`${nasNode.url}/archive`, form, {
+        headers: { ...form.getHeaders(), 'Authorization': `Bearer ${nasNode.apiKey}` },
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity,
+        timeout: 4 * 60 * 60 * 1000
+    });
+
+    let downloaded = 0;
+    try {
+        for await (const chunk of tgClient.iterDownload({ file: message, requestSize: 1024 * 1024 })) {
+            if (cancelCurrentDownload) throw new Error("DOWNLOAD_CANCELLED_BY_USER");
+            downloaded += chunk.length;
+            if (!passthrough.write(chunk)) await once(passthrough, 'drain');
+            onProgress(downloaded);
+        }
+        passthrough.end();
+    } catch (e) {
+        passthrough.destroy(e);
+        throw e;
+    }
+
+    await uploadPromise;
+};
+
+const processDownloadQueue = async () => {
+    if (isDownloading) return;
+    isDownloading = true;
+
+    let tempPath = null;
+    let nextItem = null;
+
+    try {
+        nextItem = await db.get("SELECT * FROM telegram_files WHERE status = 'queued' ORDER BY message_id ASC LIMIT 1");
+        if (!nextItem) { isDownloading = false; return; }
+
+        await db.run("UPDATE telegram_files SET status = 'downloading' WHERE message_id = ?", nextItem.message_id);
+        cancelCurrentDownload = false;
+        await log(`⬇️  TG Download Starting: ${nextItem.filename}`);
+
+        const channelIdBigInt = BigInt(CONFIG.TARGET_CHANNEL_ID);
+        const messages = await tgClient.getMessages(channelIdBigInt, { ids: [nextItem.message_id] });
+        const message = messages[0];
+
+        if (!message || !message.media) {
+             await db.run("UPDATE telegram_files SET status = 'failed' WHERE message_id = ?", nextItem.message_id);
+             isDownloading = false;
+             processDownloadQueue();
+             return;
+        }
+
+        let lastDbUpdate = 0;
+        const reportProgress = (downloaded) => {
+            const now = Date.now();
+            if (now - lastDbUpdate > 1000) {
+                lastDbUpdate = now;
+                db.run("UPDATE telegram_files SET downloaded_size = ? WHERE message_id = ?", [downloaded, nextItem.message_id]).catch(() => {});
+            }
+        };
+
+        // Prefer a node that can both store AND transcode this file in place — skips
+        // this server's disk entirely. Falls back to the classic local download below
+        // if no such node is reachable, or if the direct transfer itself fails.
+        let directNode = getNodeForDirectDownload(nextItem.size || 0);
+        if (directNode) {
+            try {
+                await log(`📡 Streaming "${nextItem.filename}" directly to node ${directNode.id} (no local disk)`);
+                await streamTelegramToNode(message, nextItem.filename, nextItem.size, directNode, reportProgress);
+                await db.run("UPDATE telegram_files SET downloaded_size = size, status = 'completed' WHERE message_id = ?", nextItem.message_id);
+                await log(`🎉 Direct-to-node transfer complete.`);
+                await processDirectToNodeFile(directNode.id, directNode.nasNode, nextItem.filename, nextItem.size, { isPrivate: 0 });
+                return;
+            } catch (nodeErr) {
+                if (nodeErr.message === "DOWNLOAD_CANCELLED_BY_USER") throw nodeErr;
+                await log(`⚠️ Direct-to-node transfer failed (${nodeErr.message}). Falling back to local download.`, 'WARN');
+                directNode = null;
+            }
+        }
+
+        if (!(await hasFreeSpace(USER_HOME))) { isDownloading = false; return; }
+
+        tempPath = path.join(TEMP_DIR, nextItem.filename);
+        await tgClient.downloadMedia(message, {
+            outputFile: tempPath, workers: 1, chunkSize: 1024 * 1024,
+            progressCallback: async (downloaded, total) => {
+                if (cancelCurrentDownload) throw new Error("DOWNLOAD_CANCELLED_BY_USER");
+                reportProgress(Number(downloaded));
+            }
+        });
+
+        await db.run("UPDATE telegram_files SET downloaded_size = size, status = 'completed' WHERE message_id = ?", nextItem.message_id);
+        await log(`🎉 Download Complete.`);
+        await processDownloadedFile(tempPath, nextItem.filename, { isPrivate: 0 });
+
+    } catch (e) {
+        if (tempPath && existsSync(tempPath)) {
+            await fs.unlink(tempPath).catch(() => {});
+            console.log(`🗑️ Deleted partial file to free space: ${tempPath}`);
+        }
+
+        if (nextItem) {
+            if (e.message.includes("DOWNLOAD_CANCELLED_BY_USER")) {
+                await db.run("UPDATE telegram_files SET status = 'stopped' WHERE message_id = ?", nextItem.message_id);
+            } else {
+                console.error("Telegram Download Error:", e);
+                await db.run("UPDATE telegram_files SET status = 'failed' WHERE message_id = ?", nextItem.message_id);
+            }
+        }
+    } finally {
+        isDownloading = false;
+        const hasMore = await db.get("SELECT 1 FROM telegram_files WHERE status = 'queued' LIMIT 1");
+        if (hasMore) processDownloadQueue(); 
+    }
+};
+
+const initTelegramListener = async () => {
+    try {
+        const session = new StringSession(CONFIG.TG_SESSION);
+        tgClient = new TelegramClient(session, CONFIG.TG_API_ID, CONFIG.TG_API_HASH, { connectionRetries: 10, useWSS: false, testServers: false, dcId: 5, timeout: 30, autoReconnect: true });
+        await tgClient.start({ onError: (err) => console.log(err) });
+        tgClient.setLogLevel("info"); 
+        console.log("🤖 Telegram Listener Active");
+        
+        const channelIdBigInt = BigInt(CONFIG.TARGET_CHANNEL_ID);
+        const history = await tgClient.getMessages(channelIdBigInt, { limit: 50 });
+        for (const msg of history) {
+            if (msg.media && (msg.media.className === 'MessageMediaDocument' || !msg.photo)) {
+                const { filename, size } = extractFileInfo(msg);
+                await db.run(`INSERT OR IGNORE INTO telegram_files (message_id, filename, size, status, date_posted) VALUES (?, ?, ?, 'discovered', ?)`, [msg.id, filename, size, new Date(msg.date * 1000).toISOString()]);
+            }
+        }
+
+        tgClient.addEventHandler(async (event) => {
+            const message = event.message;
+            if (message.media && (message.media.className === 'MessageMediaDocument' || !message.photo)) {
+                const { filename, size } = extractFileInfo(message);
+                const autoDownload = (await getSetting('telegram_auto_download', '1')) === '1';
+                const status = autoDownload ? 'queued' : 'discovered';
+                await db.run(`INSERT OR IGNORE INTO telegram_files (message_id, filename, size, status, date_posted) VALUES (?, ?, ?, ?, ?)`, [message.id, filename, size, status, new Date().toISOString()]);
+                if (autoDownload) {
+                    await log(`👀 New Video Detected: ${filename}. Queued.`);
+                    processDownloadQueue();
+                } else {
+                    await log(`👀 New Video Detected: ${filename}. Auto-download is off — left for manual download.`);
+                }
+            }
+        }, new NewMessage({ chats: [channelIdBigInt] }));
+        processDownloadQueue();
+    } catch (e) { console.error("Telegram Init Failed:", e); }
+};
+
+const restoreTorrents = async () => {
+    if (!db) return;
+    const pending = await db.all("SELECT * FROM torrents WHERE status != 'completed'");
+    console.log(`🌊 Restoring ${pending.length} active torrents...`);
+    
+    pending.forEach(t => {
+        if (torrentClient.get(t.magnet)) return; 
+        addTorrentToClient(t.magnet, false, t.is_private); 
+    });
+};
+
+const TRUSTED_TRACKERS = [
+    "udp://tracker.opentrackr.org:1337/announce",
+    "udp://open.demonii.com:1337/announce",
+    "udp://tracker.openbittorrent.com:80",
+    "udp://tracker.coppersurfer.tk:6969",
+    "udp://p4p.arenabg.com:1337",
+    "udp://tracker.leechers-paradise.org:6969"
+];
+
+const addTorrentToClient = (magnetLink, saveToDb = true, isPrivate = 0, ownerUsername = null) => {
+    const existing = torrentClient.get(magnetLink);
+    if (existing) {
+        console.log(`⚠️ Torrent already active: ${existing.name || 'Metadata pending'} (${(existing.progress * 100).toFixed(1)}%)`);
+        return;
+    }
+
+    console.log(`🌊 [DEBUG] Initializing Torrent...`);
+    let downloadDir;
+    if (isPrivate && ownerUsername) {
+        downloadDir = path.join(PRIVATE_ROOT, ownerUsername, 'Downloads');
+    } else {
+        downloadDir = path.join(TEMP_DIR, 'torrents');
+    }
+    if (!existsSync(downloadDir)) mkdirSync(downloadDir, { recursive: true });
+
+    const announceList = TRUSTED_TRACKERS.map(t => `&tr=${encodeURIComponent(t)}`).join('');
+    const finalMagnet = magnetLink.includes('tr=') ? magnetLink : magnetLink + announceList;
+
+    torrentClient.add(finalMagnet, { path: downloadDir }, async (torrent) => {
+        console.log(`🌊 [METADATA] Hash: ${torrent.infoHash}`);
+        
+        torrent.on('wire', (wire, addr) => {
+            console.log(`🤝 [PEER] Connected to ${addr}`);
+        });
+
+        setTimeout(() => {
+            if (torrent.numPeers === 0) console.log(`⚠️ [WARNING] 30s passed, 0 peers found for ${torrent.infoHash}. Check Firewall/VPN.`);
+        }, 30000);
+
+        if (saveToDb && db) {
+            try {
+                // 👇 Update Insert to include owner_username
+                await db.run(
+                    `INSERT OR IGNORE INTO torrents (hash, magnet, name, added_at, status, save_path, is_private, owner_username) VALUES (?, ?, ?, ?, 'downloading', ?, ?, ?)`,
+                    [torrent.infoHash, magnetLink, torrent.name || 'Pending...', new Date().toISOString(), downloadDir, isPrivate, ownerUsername]
+                );
+            } catch (e) { console.error("DB Save Error:", e.message); }
+        }
+
+        torrent.on('done', async () => {
+            console.log(`✅ [DONE] Torrent Finished: ${torrent.name}`);
+            if (db) await db.run("UPDATE torrents SET status = 'completed' WHERE hash = ?", torrent.infoHash);
+
+            let largestFile = null;
+            let maxBytes = 0;
+            torrent.files.forEach(file => {
+                if (VIDEO_EXTS.has(path.extname(file.path).toLowerCase())) {
+                    if (file.length > maxBytes) { maxBytes = file.length; largestFile = file; }
+                }
+            });
+
+            if (largestFile) {
+                const sourcePath = path.join(downloadDir, largestFile.path);
+                console.log(`🎞️ Processing: ${sourcePath}`);
+                await processDownloadedFile(sourcePath, path.basename(sourcePath), { 
+                    isPrivate: isPrivate, 
+                    owner: ownerUsername 
+                });
+                
+                torrent.destroy({ destroyStore: true });
+                if (db) await db.run("DELETE FROM torrents WHERE hash = ?", torrent.infoHash);
+            }
+        });
+    });
+};
+
+// ==========================================
+// EXPRESS APP & ROUTES
+// ==========================================
+
+const app = express();
+app.use(cors({ origin: '*' }));
+app.use(express.json());
+
+const upload = multer({ dest: TEMP_DIR });
+if (!existsSync(TEMP_DIR)) mkdirSync(TEMP_DIR, { recursive: true });
+if (!existsSync(EXTERNAL_ROOT)) mkdirSync(EXTERNAL_ROOT, { recursive: true });
+
+if (existsSync(CLIENT_BUILD_PATH)) app.use(express.static(CLIENT_BUILD_PATH));
+
+
+app.get('/api/posters/:filename', async (req, res) => {
+    const { filename } = req.params;
+    const thumbPath = path.join(THUMB_FOLDER, filename);
+
+    if (existsSync(thumbPath)) return res.sendFile(thumbPath);
+
+    try {
+        if (!db) await initDB();
+        const mediaItem = await db.get("SELECT path FROM media WHERE poster = ?", filename);
+
+        if (!mediaItem || !mediaItem.path) return res.status(404).send("Poster not found");
+
+        console.log(`🎨 Auto-regenerating poster for: ${filename}`);
+
+        let inputPath = mediaItem.path;
+        let inputOptions = ['-ss', '30']; // Skip 30s
+
+        if (inputPath.startsWith('nas://')) {
+            const parts = inputPath.replace('nas://', '').split('/');
+            const nasId = parts[0];
+            const remoteFilename = parts.slice(1).join('/');
+            const nasNode = KNOWN_NAS_NODES.get(nasId);
+            
+            if (!nasNode) return res.status(503).send("NAS Offline");
+            
+            inputPath = `${nasNode.url}/file/${encodeURIComponent(remoteFilename)}`;
+            
+            inputOptions = [
+                '-headers', `Authorization: Bearer ${nasNode.apiKey}\r\n`,
+                '-ss', '30'
+            ];
+        } else if (!existsSync(inputPath)) {
+            return res.status(404).send("Local file missing");
+        }
+
+        await new Promise((resolve, reject) => {
+            const cmd = ffmpeg();
+
+            cmd.inputOptions(inputOptions);
+            cmd.input(inputPath);
+            cmd.outputOptions([
+                '-vframes', '1',
+                '-q:v', '2',
+                '-vf', 'scale=320:-1'
+            ])
+            .output(thumbPath)
+            .on('end', resolve)
+            .on('error', reject)
+            .run();
+        });
+
+        res.sendFile(thumbPath);
+
+    } catch (e) {
+        console.error(`❌ Poster Gen Failed: ${e.message}`);
+        res.status(404).send("Generation failed");
+    }
+});
+
+app.get('/api/internal/download', async (req, res) => {
+    const { path: filePath, secret, nodeId } = req.query;
+    if (!(await verifyNodeKey(nodeId, secret))) return res.status(403).send("Unauthorized");
+    if (!filePath || !existsSync(filePath)) return res.status(404).send("File not found");
+    const stat = await fs.stat(filePath);
+    res.writeHead(200, { 'Content-Type': 'video/mp4', 'Content-Length': stat.size });
+    createReadStream(filePath).pipe(res);
+});
+
+app.post('/api/internal/progress', async (req, res) => {
+    const { fileId, stage, percent, secret, nodeId } = req.body;
+    if (!(await verifyNodeKey(nodeId, secret))) return res.status(403).send("Unauthorized");
+    const originalPath = Buffer.from(fileId, 'base64').toString('utf8');
+    JOB_PROGRESS.set(originalPath, { stage: stage, percent: percent, lastUpdated: Date.now() });
+    res.json({ success: true });
+});
+
+app.post('/api/internal/upload-result', 
+    (req, res, next) => { 
+        console.log(`\n📡 [DEBUG] Incoming Upload Connection...`);
+        req.setTimeout(3600000); 
+        next(); 
+    }, 
+    
+    (req, res, next) => {
+        // Extract Job ID from headers (sent by worker)
+        const fileIdHeader = req.headers['x-file-id'];
+        const totalSize = parseInt(req.headers['content-length'] || '0');
+
+        req.progressInterval = setInterval(async () => {
+            try {
+                const files = await fs.readdir(TEMP_DIR);
+                
+                let activeFile = null;
+                let newestTime = 0;
+                
+                for (const file of files) {
+                    const filePath = path.join(TEMP_DIR, file);
+                    const stats = await fs.stat(filePath);
+                    if (stats.mtimeMs > newestTime) {
+                        newestTime = stats.mtimeMs;
+                        activeFile = { size: stats.size };
+                    }
+                }
+
+                if (activeFile && fileIdHeader && totalSize > 0) {
+                    const percent = Math.round((activeFile.size / totalSize) * 100);
+                    const originalPath = Buffer.from(fileIdHeader, 'base64').toString('utf8');
+
+                    JOB_PROGRESS.set(originalPath, {
+                        stage: 'server_receiving', 
+                        percent: percent,
+                        lastUpdated: Date.now()
+                    });
+
+                    // Log to console (optional)
+                    const sizeMB = (activeFile.size / (1024 * 1024)).toFixed(2);
+                    // process.stdout.write(`\r📥 [Server Saving] ${percent}% (${sizeMB} MB)...`);
+                }
+            } catch (e) {
+                console.error("❌ [DEBUG] Progress Monitor Error:", e.message);}
+        }, 1000); 
+
+        next();
+    },
+
+    upload.single('file'), 
+    
+    async (req, res) => {
+        clearInterval(req.progressInterval); 
+        console.log(`\n🔍 [DEBUG] Upload Middleware Finished. Processing file...`);
+
+        const { fileId, secret, nodeId } = req.body;
+        if (!(await verifyNodeKey(nodeId, secret))) return res.status(403).send("Unauthorized");
+        if (!req.file) return res.status(400).send("No file uploaded");
+
+        try {
+            const originalPath = Buffer.from(fileId, 'base64').toString('utf8');
+            const tempUploadPath = req.file.path;
+            const finalPath = originalPath.replace(/\.[^/.]+$/, "") + ".mp4";
+            
+            if (existsSync(finalPath)) await fs.unlink(finalPath).catch(()=>{});
+            await fs.rename(tempUploadPath, finalPath);
+            if (finalPath !== originalPath && existsSync(originalPath)) await fs.unlink(originalPath).catch(()=>{});
+
+            await db.run("UPDATE media SET path = ?, filename = ?, transcode_status = 'completed' WHERE path = ?", [finalPath, path.basename(finalPath), originalPath]);
+            
+            JOB_PROGRESS.delete(originalPath); 
+            
+            await log(`✅ Transcode Finalized: ${path.basename(finalPath)}`);
+            checkTranscodeQueue();
+            res.json({ success: true });
+        } catch (e) {
+            if (req.file && existsSync(req.file.path)) {
+                await fs.unlink(req.file.path).catch(() => {});
+                console.log(`🗑️ Cleaned up failed internal upload: ${req.file.path}`);
+            }
+            await log(`❌ Failed to finalize: ${e.message}`, 'ERROR');
+            res.status(500).send(e.message);
+        }
+    }
+);
+
+// Callback for "transcode in place" jobs — the result never leaves the node's own
+// storage, so there's no file to receive here, just the final filename to record.
+app.post('/api/internal/transcode-complete', async (req, res) => {
+    const { fileId, secret, nodeId, finalFilename } = req.body;
+    if (!(await verifyNodeKey(nodeId, secret))) return res.status(403).send("Unauthorized");
+    if (!fileId || !finalFilename) return res.status(400).json({ error: "Missing fileId or finalFilename" });
+
+    try {
+        const originalPath = Buffer.from(fileId, 'base64').toString('utf8');
+        const finalPath = `nas://${nodeId}/${finalFilename}`;
+
+        await db.run("UPDATE media SET path = ?, filename = ?, transcode_status = 'completed' WHERE path = ?", [finalPath, finalFilename, originalPath]);
+
+        JOB_PROGRESS.delete(originalPath);
+        await log(`✅ In-place transcode finalized on ${nodeId}: ${finalFilename}`);
+        checkTranscodeQueue();
+        res.json({ success: true });
+    } catch (e) {
+        await log(`❌ Failed to finalize in-place transcode: ${e.message}`, 'ERROR');
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.get('/api/admin/dashboard', verifyToken, async (req, res) => {
+    if (!db) await initDB();
+    try {
+        const users = await db.all(`
+            SELECT username, device, device_type, ip, location, last_active, role 
+            FROM sessions 
+            WHERE last_active > ? 
+            AND role != 'super_admin'
+        `, Date.now() - 5 * 60 * 1000); 
+
+        const streams = Array.from(ACTIVE_STREAMS.entries())
+            .filter(([, s]) => !s.path.startsWith(PRIVATE_ROOT))
+            .map(([id, s]) => ({
+                id,
+                filename: s.filename,
+                ip: s.ip,
+                username: s.username || 'Guest',
+                type: s.type,
+                source: s.source,
+                duration: Math.floor((Date.now() - s.start) / 1000)
+            }));
+
+        // 👇 Unified node list: one row per admin-registered node (nodes table),
+        // enriched with whatever live status is currently known for it. A node
+        // that's been created on the dashboard but never connected still shows
+        // up here (as "Never Connected") instead of only appearing once live.
+        const dbNodes = await db.all("SELECT id, name, roles, created_at, last_seen_at, revoked, owner_user_id FROM nodes ORDER BY created_at DESC");
+        const ownerRows = await db.all("SELECT id, username FROM users");
+        const ownerUsernameById = new Map(ownerRows.map(u => [u.id, u.username]));
+        const nodes = dbNodes.map(row => {
+            const t = KNOWN_NODES.get(row.id);
+            const n = KNOWN_NAS_NODES.get(row.id);
+            // Roles are node-owner managed (editable from that node's own settings UI) — once a
+            // node has ever reported in, its live Firebase-reported roles are authoritative here,
+            // not the value picked when the admin first created it. Only a node that has never
+            // connected falls back to that original admin-picked value.
+            const roles = (t || n) ? [...(t ? ['transcoder'] : []), ...(n ? ['nas'] : [])] : (row.roles || '').split(',').filter(Boolean);
+            const isOnline = !!(t?.isReachable || n?.isReachable);
+            return {
+                id: row.id,
+                name: row.name || row.id,
+                roles,
+                revoked: !!row.revoked,
+                createdAt: row.created_at,
+                status: isOnline ? 'Online' : ((t || n) ? 'Offline' : 'Never Connected'),
+                hardware: t?.hardware || null,
+                activeJob: t?.activeJob ? path.basename(t.activeJob) : null,
+                connection: t?.directIp || n?.ip || null,
+                cpu: t?.stats?.cpu ?? n?.stats?.cpu ?? 0,
+                ram: t?.stats?.ram?.percent ?? n?.stats?.ram?.percent ?? 0,
+                network: t?.stats?.network || n?.stats?.network || { up: 0, down: 0 },
+                disk: n?.stats?.disk || null,
+                jobs: n?.stats?.jobs || [],
+                dashboardUrl: t?.activeUrl || n?.url || null,
+                ownerUserId: row.owner_user_id || null,
+                ownerUsername: row.owner_user_id ? (ownerUsernameById.get(row.owner_user_id) || null) : null
+            };
+        });
+
+        const dbQueue = await db.all(`SELECT path, filename, transcode_status FROM media WHERE transcode_status IN ('pending', 'processing', 'remote_processing') ORDER BY created_at ASC`);
+        const queue = dbQueue.map(job => {
+            const progress = JOB_PROGRESS.get(job.path);
+            return {
+                filename: job.filename, status: job.transcode_status,
+                assignedNode: Array.from(KNOWN_NODES.values()).find(n => n.activeJob === job.path)?.id || '-',
+                progress: progress || { stage: 'pending', percent: 0 }
+            };
+        });
+
+        res.json({ users, streams, nodes, queue });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/admin/streams/:id/terminate', verifyToken, async (req, res) => {
+    if (req.user.role !== 'super_admin' && req.user.role !== 'admin') {
+        return res.status(403).json({ error: "Access Denied" });
+    }
+
+    const victim = ACTIVE_STREAMS.get(req.params.id);
+    if (!victim) return res.status(404).json({ error: "Stream not found" });
+
+    try { if (victim.res) victim.res.destroy(); } catch (e) {}
+    ACTIVE_STREAMS.delete(req.params.id);
+
+    await logActivity(req.user.username, "TERMINATE_STREAM", `Terminated stream: ${victim.filename} (${victim.username})`, req.ip);
+    res.json({ success: true });
+});
+
+app.post('/api/admin/nodes', verifyToken, async (req, res) => {
+    if (req.user.role !== 'super_admin' && req.user.role !== 'admin') {
+        return res.status(403).json({ error: "Access Denied" });
+    }
+    const { name, roles, ownerUserId } = req.body;
+    const cleanRoles = Array.isArray(roles) ? roles.filter(r => ['transcoder', 'nas'].includes(r)) : [];
+    if (!name || !cleanRoles.length) return res.status(400).json({ error: "Name and at least one role are required" });
+
+    try {
+        let id;
+        do { id = generateNodeId(name); } while (await db.get("SELECT 1 FROM nodes WHERE id = ?", id));
+
+        const apiKey = generateApiKey();
+        const rolesStr = cleanRoles.join(',');
+
+        await db.run(
+            "INSERT INTO nodes (id, name, roles, api_key, created_at, revoked, owner_user_id) VALUES (?, ?, ?, ?, ?, 0, ?)",
+            [id, name, rolesStr, apiKey, new Date().toISOString(), ownerUserId || null]
+        );
+
+        if (isFirebaseActive) {
+            await admin.database().ref(`node_keys/${id}`).set({ hash: hashApiKey(apiKey), roles: cleanRoles, revoked: false });
+        }
+
+        await logActivity(req.user.username, "NODE_CREATE", `Created node "${name}" (${rolesStr})`, req.ip);
+        res.json({ id, name, roles: cleanRoles, apiKey });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/admin/nodes/:id/owner', verifyToken, async (req, res) => {
+    if (req.user.role !== 'super_admin' && req.user.role !== 'admin') {
+        return res.status(403).json({ error: "Access Denied" });
+    }
+    const { ownerUserId } = req.body;
+    try {
+        const node = await db.get("SELECT * FROM nodes WHERE id = ?", req.params.id);
+        if (!node) return res.status(404).json({ error: "Node not found" });
+
+        if (ownerUserId) {
+            const owner = await db.get("SELECT id, username FROM users WHERE id = ?", ownerUserId);
+            if (!owner) return res.status(400).json({ error: "User not found" });
+        }
+
+        await db.run("UPDATE nodes SET owner_user_id = ? WHERE id = ?", [ownerUserId || null, node.id]);
+        await logActivity(req.user.username, "NODE_OWNER", `Set owner of node "${node.name}"`, req.ip);
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/admin/nodes/:id/regenerate', verifyToken, async (req, res) => {
+    if (req.user.role !== 'super_admin' && req.user.role !== 'admin') {
+        return res.status(403).json({ error: "Access Denied" });
+    }
+    try {
+        const node = await db.get("SELECT * FROM nodes WHERE id = ?", req.params.id);
+        if (!node) return res.status(404).json({ error: "Node not found" });
+
+        const apiKey = generateApiKey();
+        await db.run("UPDATE nodes SET api_key = ? WHERE id = ?", [apiKey, node.id]);
+
+        if (isFirebaseActive) {
+            await admin.database().ref(`node_keys/${node.id}`).update({ hash: hashApiKey(apiKey) });
+        }
+
+        // Push the new key into any live map entries so outbound calls switch to it immediately.
+        if (KNOWN_NODES.has(node.id)) KNOWN_NODES.get(node.id).apiKey = apiKey;
+        if (KNOWN_NAS_NODES.has(node.id)) KNOWN_NAS_NODES.get(node.id).apiKey = apiKey;
+
+        await logActivity(req.user.username, "NODE_REGENERATE", `Regenerated key for node "${node.name}"`, req.ip);
+        res.json({ id: node.id, name: node.name, roles: (node.roles || '').split(',').filter(Boolean), apiKey });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/admin/nodes/:id', verifyToken, async (req, res) => {
+    if (req.user.role !== 'super_admin' && req.user.role !== 'admin') {
+        return res.status(403).json({ error: "Access Denied" });
+    }
+    try {
+        const node = await db.get("SELECT * FROM nodes WHERE id = ?", req.params.id);
+        if (!node) return res.status(404).json({ error: "Node not found" });
+
+        await db.run("DELETE FROM nodes WHERE id = ?", req.params.id);
+        if (isFirebaseActive) {
+            await admin.database().ref(`node_keys/${req.params.id}`).update({ revoked: true });
+        }
+        KNOWN_NODES.delete(req.params.id);
+        KNOWN_NAS_NODES.delete(req.params.id);
+
+        await logActivity(req.user.username, "NODE_DELETE", `Removed node "${node.name}"`, req.ip);
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/admin/nodes/:id/live', verifyToken, async (req, res) => {
+    if (req.user.role !== 'super_admin' && req.user.role !== 'admin') {
+        return res.status(403).json({ error: "Access Denied" });
+    }
+    const t = KNOWN_NODES.get(req.params.id);
+    const n = KNOWN_NAS_NODES.get(req.params.id);
+    const apiKey = t?.apiKey || n?.apiKey;
+    const url = t?.activeUrl || n?.url;
+    if (!apiKey || !url) return res.status(404).json({ error: "Node not reachable" });
+
+    try {
+        const response = await axios.get(`${url}/stats`, { timeout: 3000, headers: { 'Authorization': `Bearer ${apiKey}` } });
+        res.json(response.data);
+    } catch (e) { res.status(502).json({ error: "Could not reach node" }); }
+});
+
+// --- Node-owner proxy routes: distinct from the admin-only /api/admin/nodes/:id/live
+// above. A node's delegated owner is not necessarily a global admin, so these are gated
+// per-node (owner_user_id match) instead of by role, and never expose the raw apiKey to
+// the browser — everything is forwarded server-side, same pattern as /live.
+const nodeOwnerGate = async (req, res, next) => {
+    try {
+        const node = await db.get("SELECT * FROM nodes WHERE id = ?", req.params.id);
+        if (!node) return res.status(404).json({ error: "Node not found" });
+        const isAdmin = req.user.role === 'admin' || req.user.role === 'super_admin';
+        if (!isAdmin && node.owner_user_id !== req.user.id) {
+            return res.status(403).json({ error: "Access Denied" });
+        }
+        req.node = node;
+        next();
+    } catch (e) { res.status(500).json({ error: e.message }); }
+};
+
+const resolveLiveNode = (id) => {
+    const t = KNOWN_NODES.get(id);
+    const n = KNOWN_NAS_NODES.get(id);
+    return { apiKey: t?.apiKey || n?.apiKey, url: t?.activeUrl || n?.url };
+};
+
+app.get('/api/node-owner/:id/live', verifyToken, nodeOwnerGate, async (req, res) => {
+    const { apiKey, url } = resolveLiveNode(req.params.id);
+    if (!apiKey || !url) return res.status(404).json({ error: "Node not reachable" });
+    try {
+        const response = await axios.get(`${url}/stats`, { timeout: 3000, headers: { 'Authorization': `Bearer ${apiKey}` } });
+        res.json(response.data);
+    } catch (e) { res.status(502).json({ error: "Could not reach node" }); }
+});
+
+app.get('/api/node-owner/:id/config', verifyToken, nodeOwnerGate, async (req, res) => {
+    const { apiKey, url } = resolveLiveNode(req.params.id);
+    if (!apiKey || !url) return res.status(404).json({ error: "Node not reachable" });
+    try {
+        const response = await axios.get(`${url}/api/config`, { timeout: 3000, headers: { 'Authorization': `Bearer ${apiKey}` } });
+        res.json(response.data);
+    } catch (e) { res.status(502).json({ error: "Could not reach node" }); }
+});
+
+app.post('/api/node-owner/:id/config', verifyToken, nodeOwnerGate, async (req, res) => {
+    const { apiKey, url } = resolveLiveNode(req.params.id);
+    if (!apiKey || !url) return res.status(404).json({ error: "Node not reachable" });
+    try {
+        const response = await axios.post(`${url}/api/config`, req.body, { timeout: 3000, headers: { 'Authorization': `Bearer ${apiKey}` } });
+        res.json(response.data);
+    } catch (e) { res.status(502).json({ error: "Could not reach node" }); }
+});
+
+app.post('/api/node-owner/:id/restart', verifyToken, nodeOwnerGate, async (req, res) => {
+    const { apiKey, url } = resolveLiveNode(req.params.id);
+    if (!apiKey || !url) return res.status(404).json({ error: "Node not reachable" });
+    try {
+        const response = await axios.post(`${url}/api/self/restart`, {}, { timeout: 3000, headers: { 'Authorization': `Bearer ${apiKey}` } });
+        res.json(response.data);
+    } catch (e) { res.status(502).json({ error: "Could not reach node" }); }
+});
+
+app.get('/api/node-owner/:id/history', verifyToken, nodeOwnerGate, async (req, res) => {
+    const { apiKey, url } = resolveLiveNode(req.params.id);
+    if (!apiKey || !url) return res.status(404).json({ error: "Node not reachable" });
+    try {
+        const response = await axios.get(`${url}/api/history`, { timeout: 3000, headers: { 'Authorization': `Bearer ${apiKey}` } });
+        res.json(response.data);
+    } catch (e) { res.status(502).json({ error: "Could not reach node" }); }
+});
+
+app.get('/api/node-owner/:id/files', verifyToken, nodeOwnerGate, async (req, res) => {
+    const { apiKey, url } = resolveLiveNode(req.params.id);
+    if (!apiKey || !url) return res.status(404).json({ error: "Node not reachable" });
+    try {
+        const response = await axios.get(`${url}/api/files`, { timeout: 3000, headers: { 'Authorization': `Bearer ${apiKey}` } });
+        res.json(response.data);
+    } catch (e) { res.status(502).json({ error: "Could not reach node" }); }
+});
+
+app.get('/api/admin/settings', verifyToken, async (req, res) => {
+    if (req.user.role !== 'super_admin' && req.user.role !== 'admin') {
+        return res.status(403).json({ error: "Access Denied" });
+    }
+    res.json({
+        telegramAutoDownload: (await getSetting('telegram_auto_download', '1')) === '1'
+    });
+});
+
+app.post('/api/admin/settings', verifyToken, async (req, res) => {
+    if (req.user.role !== 'super_admin' && req.user.role !== 'admin') {
+        return res.status(403).json({ error: "Access Denied" });
+    }
+    const { telegramAutoDownload } = req.body;
+    if (typeof telegramAutoDownload === 'boolean') {
+        await setSetting('telegram_auto_download', telegramAutoDownload ? '1' : '0');
+    }
+    res.json({ success: true });
+});
+
+app.post('/api/auth/login', async (req, res) => {
+    const { username, password, device, device_type } = req.body;
+    const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'Unknown';
+
+    if (!db) await initDB();
+
+    try {
+        const user = await db.get("SELECT * FROM users WHERE username = ?", username);
+        
+        if (!user) return res.status(401).json({ error: 'User not found' });
+        
+        const hash = hashPassword(password);
+        if (user.password !== hash) return res.status(401).json({ error: 'Invalid password' });
+
+        if (user.status === 'pending') return res.status(403).json({ error: 'Account pending approval by admin.' });
+        if (user.status === 'rejected') return res.status(403).json({ error: 'Account rejected.' });
+
+        const token = crypto.randomUUID();
+        let location = "Unknown";
+        try {
+            if (ip.length > 7 && !ip.startsWith('192.168') && !ip.startsWith('127.')) {
+                const geo = await axios.get(`http://ip-api.com/json/${ip}?fields=city,regionName,country`);
+                if (geo.data && geo.data.city) location = `${geo.data.city}, ${geo.data.regionName}, ${geo.data.country}`;
+            } else { location = "Local Network"; }
+        } catch (e) {}
+
+        console.log(`🔐 User Logged In: ${username} from IP: ${ip} on ${device} | (${device_type})`);
+        await db.run(
+            `INSERT INTO sessions (token, role, last_active, ip, location, username, device, device_type) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, 
+            [
+                token, 
+                user.role, 
+                Date.now(), 
+                ip, 
+                location, 
+                user.username, 
+                device || 'Unknown Device',
+                device_type || 'Web Browser' 
+            ]
+        );
+
+        await logActivity(user.username, "LOGIN", `Logged in from ${device || 'Unknown'} | ${device_type || 'Unknown'}`, ip);
+
+        return res.json({ success: true, token, role: user.role, username: user.username });
+
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.post('/api/auth/register', async (req, res) => {
+    const { username, password } = req.body;
+    if (!username || !password) return res.status(400).json({ error: "Missing fields" });
+
+    if (!db) await initDB();
+
+    try {
+        const existing = await db.get("SELECT id FROM users WHERE username = ?", username);
+        if (existing) return res.status(400).json({ error: "Username taken" });
+
+        const hash = hashPassword(password);
+        await db.run(
+            "INSERT INTO users (username, password, role, status, created_at) VALUES (?, ?, 'public', 'pending', ?)", 
+            [username, hash, new Date().toISOString()]
+        );
+
+        res.json({ success: true, message: "Registration successful. Please wait for admin approval." });
+    } catch (e) {
+        res.status(500).json({ error: "Registration failed" });
+    }
+});
+
+app.post('/api/auth/change-password', verifyToken, async (req, res) => {
+    const { oldPassword, newPassword } = req.body;
+    const username = req.user.username;
+    console.log(`Password change request for user: ${username}`);
+
+    if (!oldPassword || !newPassword) return res.status(400).json({ error: "Missing fields" });
+
+    try {
+        const user = await db.get("SELECT * FROM users WHERE username = ?", username);
+        if (!user) return res.status(404).json({ error: "User not found" });
+
+        const oldHash = hashPassword(oldPassword);
+        if (user.password !== oldHash) {
+            return res.status(401).json({ error: "Incorrect old password" });
+        }
+
+        const newHash = hashPassword(newPassword);
+        await db.run("UPDATE users SET password = ? WHERE username = ?", [newHash, username]);
+
+        res.json({ success: true, message: "Password updated successfully" });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.post('/api/auth/logout', verifyToken, async (req, res) => {
+    const token = req.headers.authorization.split('Bearer ')[1];
+    try {
+        await logActivity(req.user.username, "LOGOUT", "User logged out manually", req.ip);
+        
+        await db.run("DELETE FROM sessions WHERE token = ?", token);
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.get('/api/auth/kunji/config', (req, res) => {
+    const kunjiCfg = externalConfig.kunji || {};
+    if (!kunjiCfg.callbackUrl) return res.status(503).json({ error: 'Kunji auth not configured on this server' });
+    res.json({ callbackUrl: kunjiCfg.callbackUrl, audience: kunjiCfg.audience || '' });
+});
+
+app.post('/api/auth/kunji/session', async (req, res) => {
+    if (!isFirebaseActive) return res.status(503).json({ error: 'Kunji auth unavailable' });
+    try {
+        const session = await startKunjiSession(req.body?.scope || null);
+        res.json(session);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/auth/kunji/status', (req, res) => {
+    const e = KUNJI_SESSIONS.get(req.query.sessionId || '');
+    if (!e) return res.status(404).json({ error: 'unknown_session' });
+    res.json({ status: e.status, sub: e.sub, claims: e.claims });
+});
+
+app.post('/api/auth/kunji/finalize', async (req, res) => {
+    const { sessionId, sub } = req.body;
+    if (!sub) return res.status(400).json({ error: 'sub is required' });
+
+    let approvedClaims = null;
+    if (sessionId) {
+        const entry = KUNJI_SESSIONS.get(sessionId);
+        if (!entry || entry.status !== 'approved' || entry.sub !== sub ||
+            !entry.approvedAt || Date.now() - entry.approvedAt > 60_000) {
+            return res.status(401).json({ error: 'No valid approval for this session/identity' });
+        }
+        approvedClaims = entry.claims;
+    } else {
+        const rec = KUNJI_RECENTLY_APPROVED.get(sub);
+        if (!rec || Date.now() - rec.approvedAt > 60_000) {
+            return res.status(401).json({ error: 'No recent kunji approval for this identity' });
+        }
+        approvedClaims = rec.claims;
+    }
+
+    try {
+        if (!db) await initDB();
+        const user = await db.get("SELECT * FROM users WHERE kunji_sub = ?", sub);
+        if (!user) return res.status(403).json({ error: 'No streampi account linked to this kunji identity' });
+        if (user.status === 'pending') return res.status(403).json({ error: 'Account pending approval by admin.' });
+        if (user.status === 'rejected') return res.status(403).json({ error: 'Account rejected.' });
+
+        if (sessionId) KUNJI_SESSIONS.delete(sessionId);
+        KUNJI_RECENTLY_APPROVED.delete(sub);
+
+        const token = crypto.randomUUID();
+        const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'Unknown';
+        await db.run(
+            `INSERT INTO sessions (token, role, last_active, ip, location, username, device, device_type)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [token, user.role, Date.now(), ip, 'Kunji Login', user.username, 'Kunji Wallet', 'Kunji']
+        );
+        console.log(`🔐 User Logged In via Kunji: ${user.username} from IP: ${ip}`);
+        await logActivity(user.username, "LOGIN", "Logged in via Kunji", ip);
+
+        res.json({ success: true, token, role: user.role, username: user.username });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/auth/kunji/link', verifyToken, async (req, res) => {
+    const { sub } = req.body;
+    if (!sub) return res.status(400).json({ error: 'sub is required' });
+    try {
+        const existing = await db.get("SELECT id FROM users WHERE kunji_sub = ?", sub);
+        if (existing && existing.id !== req.user.id) {
+            return res.status(409).json({ error: 'This kunji identity is already linked to another account' });
+        }
+        await db.run("UPDATE users SET kunji_sub = ? WHERE id = ?", [sub, req.user.id]);
+        await logActivity(req.user.username, "KUNJI_LINK", "Linked kunji identity to account", req.ip);
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/admin/users', verifyToken, async (req, res) => {
+    if (req.user.role !== 'super_admin' && req.user.role !== 'admin') {
+        return res.status(403).json({ error: "Access Denied" });
+    }
+
+    const users = await db.all(`
+        SELECT id, username, role, status, created_at 
+        FROM users 
+        WHERE (status = 'pending' OR status = 'approved') 
+        AND role != 'super_admin' 
+        ORDER BY status DESC, created_at DESC
+    `);
+    
+    res.json(users);
+});
+
+app.post('/api/admin/users/action', verifyToken, async (req, res) => {
+    const currentUserRole = req.user.role;
+    
+    if (currentUserRole !== 'super_admin' && currentUserRole !== 'admin') {
+        return res.status(403).json({ error: "Access Denied" });
+    }
+
+    const { userId, action } = req.body; 
+    
+    try {
+        const targetUser = await db.get("SELECT * FROM users WHERE id = ?", userId);
+        if (!targetUser) return res.status(404).json({ error: "User not found" });
+
+        if (targetUser.role === 'super_admin') {
+            return res.status(403).json({ error: "Cannot modify the Super Admin." });
+        }
+        
+        if (currentUserRole === 'admin' && targetUser.role === 'admin') {
+            return res.status(403).json({ error: "Admins cannot modify other Admins." });
+        }
+
+        if ((action === 'promote' || action === 'demote') && currentUserRole !== 'super_admin') {
+            return res.status(403).json({ error: "Only Super Admin can change roles." });
+        }
+
+        if (action === 'approve') await db.run("UPDATE users SET status = 'approved' WHERE id = ?", userId);
+        
+        if (action === 'reject' || action === 'delete') {
+            await db.run("DELETE FROM sessions WHERE username = ?", targetUser.username);
+            await db.run("DELETE FROM users WHERE id = ?", userId);
+        }
+
+        if (action === 'promote') { 
+            await db.run("UPDATE users SET role = 'admin' WHERE id = ?", userId);
+            await db.run("UPDATE sessions SET role = 'admin' WHERE username = ?", targetUser.username);
+        }
+        if (action === 'demote') {
+            await db.run("UPDATE users SET role = 'user' WHERE id = ?", userId);
+            await db.run("UPDATE sessions SET role = 'user' WHERE username = ?", targetUser.username);
+        }
+        if (action === 'unlink_kunji') {
+            await db.run("UPDATE users SET kunji_sub = NULL WHERE id = ?", userId);
+        }
+
+        await logActivity(req.user.username, "ADMIN_ACTION", `${action.toUpperCase()} user ${targetUser.username}`, req.ip);
+        res.json({ success: true });
+
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/admin/activity', verifyToken, async (req, res) => {
+    if (req.user.role !== 'super_admin') return res.status(403).json({ error: "Access Denied" });
+    
+    try {
+        const logs = await db.all("SELECT * FROM activity_logs ORDER BY timestamp DESC LIMIT 100");
+        res.json(logs);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.get('/api/status/system', verifyToken, async (req, res) => {
+    try {
+        const fiveMinutesAgo = Date.now() - 5 * 60 * 1000;
+        
+        const result = await db.get(
+            "SELECT COUNT(*) as count FROM sessions WHERE last_active > ? AND role != 'super_admin'", 
+            fiveMinutesAgo
+        );
+        const activeUsers = result ? result.count : 0;
+        
+        const publicStreamCount = Array.from(ACTIVE_STREAMS.values())
+            .filter(s => !s.path.startsWith(PRIVATE_ROOT))
+            .length;
+
+        await db.run("DELETE FROM sessions WHERE last_active < ?", Date.now() - 72 * 60 * 60 * 1000);
+
+        res.json({
+            onlineUsers: activeUsers,
+            activeStreams: publicStreamCount, 
+            cpu: SYSTEM_STATS.cpu,
+            ram: SYSTEM_STATS.ram,
+            network: SYSTEM_STATS.network
+        });
+    } catch (e) { 
+        res.status(500).json({ error: "Stats error" }); 
+    }
+});
+
+app.get('/api/status/storage', verifyToken, async (req, res) => {
+    try {
+        const disk = await checkDiskSpace(MEDIA_ROOT);
+        res.json({ total: disk.size, free: disk.free, used: disk.size - disk.free, percentage: ((disk.size - disk.free) / disk.size) * 100 });
+    } catch (e) { res.status(500).json({ error: "Disk error" }); }
+});
+
+app.get('/api/status/speedtest', verifyToken, async (req, res) => {
+    // Only Super Admin can run this (consumes bandwidth)
+    if (req.user.role !== 'super_admin') return res.status(403).json({ error: "Access Denied" });
+
+    try {
+        console.log("🚀 Starting Network Speed Test...");
+        
+        // Run Ookla Speedtest
+        // bandwidth is returned in bytes per second
+        const result = await speedTest({ acceptLicense: true, acceptGdpr: true });
+
+        res.json({
+            success: true,
+            download: result.download.bandwidth, // Bytes/sec
+            upload: result.upload.bandwidth,     // Bytes/sec
+            ping: result.ping.latency,           // ms
+            isp: result.isp,
+            server: result.server
+        });
+    } catch (e) {
+        console.error("Speedtest failed:", e.message);
+        res.status(500).json({ error: "Speedtest failed. Check server logs." });
+    }
+});
+
+app.get('/api/library', verifyToken, async (req, res) => {
+    if (!db) await initDB();
+    
+    let query;
+    let params = [];
+
+    if (req.user.role === 'super_admin') {
+        query = 'SELECT * FROM media';
+    } else {
+        query = 'SELECT * FROM media WHERE is_private = 0 OR owner_username = ?';
+        params = [req.user.username];
+    }
+
+    const media = await db.all(query, params);
+
+    const historyUser = req.user.username; 
+    const history = await db.all('SELECT * FROM history WHERE user_email = ?', [historyUser]);
+    
+    const historyMap = {}; 
+    history.forEach(h => { historyMap[h.media_path] = h; });
+
+    const result = { movies: [], series: {}, continueWatching: [] };
+    
+    for (const item of media) {
+        const historyItem = historyMap[item.path];
+        const finalItem = historyItem ? { ...item, ...historyItem } : item;
+        
+        if (finalItem.type === 'movie') {
+            result.movies.push(finalItem);
+        } else {
+            if (!result.series[finalItem.series_name]) result.series[finalItem.series_name] = [];
+            result.series[finalItem.series_name].push(finalItem);
+        }
+    }
+
+    for (const h of history) {
+        const m = media.find(x => x.path === h.media_path);
+        if (m && (h.progress / h.duration) < 0.95) {
+            result.continueWatching.push({ ...m, ...h });
+        }
+    }
+
+    result.continueWatching.sort((a, b) => new Date(b.last_watched) - new Date(a.last_watched));
+    
+    const seriesArray = Object.keys(result.series).map(name => ({ 
+        title: name, 
+        episodes: result.series[name].sort((a,b) => (a.season * 100 + a.episode) - (b.season * 100 + b.episode)) 
+    }));
+    
+    res.json({ ...result, series: seriesArray });
+});
+
+app.get('/api/series', verifyToken, async (req, res) => { 
+    if (!db) await initDB(); 
+
+    let query = req.user.role === 'super_admin' ? 
+            "SELECT DISTINCT series_name FROM media WHERE type = 'series' ORDER BY series_name" : 
+            "SELECT DISTINCT series_name FROM media WHERE type = 'series' AND is_private = 0 ORDER BY series_name";
+
+    const rows = await db.all(query); 
+    res.json(rows.map(r => r.series_name)); 
+});
+
+app.get('/api/series/:name', verifyToken, async (req, res) => { 
+    if (!db) await initDB(); 
+    
+    let query = req.user.role === 'super_admin' ? 
+            "SELECT season, episode FROM media WHERE series_name = ? ORDER BY season, episode" : 
+            "SELECT season, episode FROM media WHERE series_name = ? AND is_private = 0 ORDER BY season, episode";
+
+    const rows = await db.all(query, req.params.name); 
+    res.json(rows); 
+});
+
+app.post('/api/media/toggle-privacy', verifyToken, async (req, res) => {
+    const { path: currentPath } = req.body;
+    
+    try {
+        const item = await db.get("SELECT * FROM media WHERE path = ?", currentPath);
+        if (!item) return res.status(404).json({ error: "Item not found" });
+        if (item.is_archived) return res.status(400).json({ error: "Cannot toggle privacy on NAS items. Restore first." });
+
+        // 1. Permission Check: Allow if Super Admin OR if User owns the file
+        if (req.user.role !== 'super_admin' && item.owner_username !== req.user.username) {
+            return res.status(403).json({ error: "Access Denied: You do not own this file." });
+        }
+
+        const isGoingPrivate = item.is_private === 0;
+        const owner = item.owner_username || req.user.username; // Assign owner if previously null
+        
+        let newPath;
+
+        if (isGoingPrivate) {
+            // Public -> Private (Move to /StreamMedia_Private/<Username>/...)
+            const relativePath = path.relative(MEDIA_ROOT, currentPath);
+            newPath = path.join(PRIVATE_ROOT, owner, relativePath);
+        } else {
+            // Private -> Public (Move to /StreamMedia/...)
+            // We find the path relative to the user's private folder
+            const userVaultRoot = path.join(PRIVATE_ROOT, owner);
+            const relativePath = path.relative(userVaultRoot, currentPath);
+            newPath = path.join(MEDIA_ROOT, relativePath);
+        }
+
+        const newDir = path.dirname(newPath);
+        if (!existsSync(newDir)) await fs.mkdir(newDir, { recursive: true });
+        
+        await fs.rename(currentPath, newPath);
+
+        // Update DB: Update path, is_private, and ensure owner_username is set
+        await db.run("UPDATE media SET path = ?, is_private = ?, owner_username = ? WHERE path = ?", 
+            [newPath, isGoingPrivate ? 1 : 0, owner, currentPath]);
+            
+        await db.run("UPDATE history SET media_path = ? WHERE media_path = ?", [newPath, currentPath]);
+
+        await logActivity(req.user.username, "PRIVACY", `Marked ${item.filename} as ${isGoingPrivate ? 'Private' : 'Public'}`, req.ip);
+
+        res.json({ success: true, newPath, isPrivate: isGoingPrivate });
+
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.get('/api/media/info', verifyToken, async (req, res) => {
+    let { path: filePath } = req.query;
+    if (!filePath) return res.status(400).send("Path required");
+
+    try {
+        filePath = decodeURIComponent(filePath);
+    } catch (e) {
+        console.error("Path decoding failed", e);
+    }
+
+    console.log(`ℹ️ [Media Info] Probing: ${filePath}`);
+
+    const formatResponse = (metadata) => {
+        try {
+            const fileSize = metadata.format && metadata.format.size 
+                ? parseInt(metadata.format.size, 10) 
+                : 0;
+
+            const audioTracks = metadata.streams
+                .filter(s => s.codec_type === 'audio')
+                .map((s, i) => ({
+                    index: i,
+                    label: s.tags?.title || s.tags?.language || s.codec_name || `Audio ${i + 1}`,
+                    language: s.tags?.language || 'und',
+                    codec: s.codec_name
+                }));
+
+            const subtitleTracks = metadata.streams
+                .filter(s => s.codec_type === 'subtitle')
+                .map((s) => ({
+                    index: s.index,
+                    label: s.tags?.title || s.tags?.language || s.codec_name || `Subtitle ${s.index}`,
+                    language: s.tags?.language || 'en',
+                    codec: s.codec_name
+                }));
+
+            return { fileSize, audioTracks, subtitleTracks };
+        } catch (e) { 
+            console.error("Metadata parse error:", e);
+            return { fileSize: 0, audioTracks: [], subtitleTracks: [] }; 
+        }
+    };
+
+    if (filePath.startsWith('nas://')) {
+        const parts = filePath.replace('nas://', '').split('/');
+        const nasId = parts[0];
+        const filename = parts.slice(1).join('/');
+        const nasNode = KNOWN_NAS_NODES.get(nasId);
+
+        if (!nasNode) return res.status(503).json({ error: "NAS Offline" });
+
+        const fileUrl = `${nasNode.url}/file/${encodeURIComponent(filename)}`;
+        
+        const cmd = `ffprobe -v quiet -print_format json -show_streams -show_format -headers "Authorization: Bearer ${nasNode.apiKey}" "${fileUrl}"`;
+
+        exec(cmd, (error, stdout, stderr) => {
+            if (error) {
+                console.error("NAS Probe Error:", stderr);
+                return res.json({ fileSize: 0, audioTracks: [], subtitleTracks: [] });
+            }
+            try {
+                const metadata = JSON.parse(stdout);
+                res.json(formatResponse(metadata));
+            } catch (e) {
+                res.json({ fileSize: 0, audioTracks: [], subtitleTracks: [] });
+            }
+        });
+    } 
+    
+    else if (existsSync(filePath)) {
+        ffmpeg.ffprobe(filePath, (err, metadata) => {
+            if (err) {
+                console.error("FFprobe Error:", err.message);
+                return res.status(500).json({ error: "Probe failed" });
+            }
+            res.json(formatResponse(metadata));
+        });
+    } else {
+        console.error(`❌ File Not Found on Disk: ${filePath}`);
+        res.status(404).send("File not found on server disk");
+    }
+});
+
+app.get('/api/subtitle', verifyToken, async (req, res) => {
+    const { path: filePath, index } = req.query;
+    if (!filePath || !index) return res.status(400).send("Missing params");
+
+    let inputPath = filePath;
+    let inputOptions = [];
+
+    if (filePath.startsWith('nas://')) {
+        const parts = filePath.replace('nas://', '').split('/');
+        const nasId = parts[0];
+        const filename = parts.slice(1).join('/');
+        const nasNode = KNOWN_NAS_NODES.get(nasId);
+        if (!nasNode) return res.status(503).send("NAS Offline");
+        
+        inputPath = `${nasNode.url}/file/${encodeURIComponent(filename)}`;
+        inputOptions = [`-headers`, `Authorization: Bearer ${nasNode.apiKey}`];
+    } else if (!existsSync(filePath)) {
+        return res.status(404).send("File not found");
+    }
+
+    res.setHeader('Content-Type', 'text/vtt');
+
+    ffmpeg(inputPath)
+        .inputOptions(inputOptions)
+        .outputOptions([
+            `-map 0:${index}`, 
+            '-f webvtt' 
+        ])
+        .on('error', (err) => {
+            console.error('Subtitle extraction error:', err.message);
+            if (!res.headersSent) res.status(500).end();
+        })
+        .pipe(res, { end: true });
+});
+
+app.get('/api/stream', verifyToken, async (req, res) => {
+    const { path: filePath, track, startTime, codecs } = req.query; 
+    const requestedTrack = parseInt(track) || 0;
+    
+    console.log(`\n🎬 [DEBUG] Stream Request: startTime: ${startTime || '0'}, codecs: ${codecs || 'default'}`);
+    
+    if (filePath.startsWith(PRIVATE_ROOT)) {
+        if (!db) await initDB();
+        const mediaItem = await db.get("SELECT owner_username, is_private FROM media WHERE path = ?", filePath);
+
+        // If file exists in DB and is private
+        if (mediaItem && mediaItem.is_private === 1) {
+            // Check if requester is Owner OR Super Admin
+            if (req.user.role !== 'super_admin' && mediaItem.owner_username !== req.user.username) {
+                console.log(`⛔ Access Denied: ${req.user.username} tried to access vault of ${mediaItem.owner_username}`);
+                cleanup(); 
+                return res.status(403).send("Access Denied: User Private Vault");
+            }
+        }
+    }
+
+    const clientCodecs = (codecs || "").split(',');
+    const supportsH264 = clientCodecs.includes('h264') || !codecs; 
+    const supportsHEVC = clientCodecs.includes('hevc');
+    const supportsAAC = clientCodecs.includes('aac') || !codecs;
+
+    const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+    const isNas = filePath && filePath.startsWith('nas://');
+    
+    let fileMetadata;
+    try {
+        fileMetadata = await new Promise((resolve, reject) => {
+            if (!isNas && existsSync(filePath)) {
+                ffmpeg.ffprobe(filePath, (err, data) => {
+                    if (err) reject(err); else resolve(data);
+                });
+            } else {
+                resolve(null); 
+            }
+        });
+    } catch (e) {}
+
+    let isDirectPlay = false;
+
+    if (fileMetadata) {
+        // Detailed Check
+        const videoStream = fileMetadata.streams.find(s => s.codec_type === 'video');
+        const audioStream = fileMetadata.streams.find(s => s.codec_type === 'audio'); 
+
+        const vCodec = videoStream?.codec_name;
+        const aCodec = audioStream?.codec_name;
+        const container = path.extname(filePath).toLowerCase();
+
+        // 1. Container Check (MP4 is safest, MKV usually needs transcode on Web)
+        const isSafeContainer = container === '.mp4'; // Android TV handles MKV, Web usually doesn't.
+        // You could pass 'client=android' param to relax this.
+
+        const videoOK = (vCodec === 'h264' && supportsH264) || (vCodec === 'hevc' && supportsHEVC);
+        const audioOK = (aCodec === 'aac' && supportsAAC); 
+
+        const trackOK = requestedTrack === 0;
+
+        isDirectPlay = isSafeContainer && videoOK && audioOK && trackOK;
+    } else {
+        isDirectPlay = filePath.endsWith('.mp4') && requestedTrack === 0;
+    }
+    
+    const streamType = isDirectPlay ? 'direct' : 'transcode';
+
+    let directCount = 0;
+    let transcodeCount = 0;
+
+    for (const s of ACTIVE_STREAMS.values()) {
+        if (s.type === 'direct') directCount++;
+        else if (s.type === 'transcode') transcodeCount++;
+    }
+
+    if (streamType === 'transcode' && transcodeCount >= 2) {
+        console.log(`⛔ Rejected Transcode Stream from ${clientIp} (Limit Reached)`);
+        return res.status(503).send("Server Busy: Maximum of 2 concurrent transcoding streams allowed.");
+    }
+
+    if (streamType === 'direct' && directCount >= 4) {
+        console.log(`⚠️ Direct Stream Limit Reached. Kicking oldest user...`);
+        
+        let oldestId = null;
+        let oldestTime = Infinity;
+
+        for (const [id, s] of ACTIVE_STREAMS.entries()) {
+            if (s.type === 'direct' && s.start < oldestTime) {
+                oldestTime = s.start;
+                oldestId = id;
+            }
+        }
+
+        if (oldestId) {
+            const victim = ACTIVE_STREAMS.get(oldestId);
+            try { 
+                if (victim.res) victim.res.destroy();
+                ACTIVE_STREAMS.delete(oldestId);
+            } catch(e) {}
+        }
+    }
+
+    const streamId = crypto.randomUUID();
+    let sourceLabel = 'local';
+    if (isNas) {
+        const parts = filePath.replace('nas://', '').split('/');
+        sourceLabel = `nas (${parts[0]})`; 
+    }
+    const streamInfo = { 
+        res, 
+        type: streamType, 
+        path: filePath, 
+        start: Date.now(), 
+        ip: clientIp,
+        username: req.user.username,
+        filename: path.basename(filePath),
+        source: sourceLabel,
+        proxyRequest: null, 
+        command: null       
+    };
+    
+    ACTIVE_STREAMS.set(streamId, streamInfo);
+    
+    if (req.user && req.user.username && req.user.role != "super_admin") {
+        await logActivity(req.user.username, "WATCH", `Started watching: ${path.basename(filePath)}`, clientIp);
+    }
+
+    let isCleanedUp = false;
+    const cleanup = () => {
+        if (isCleanedUp) return;
+        isCleanedUp = true;
+        if (ACTIVE_STREAMS.has(streamId)) {
+            const s = ACTIVE_STREAMS.get(streamId);
+            if (s.command) { try { s.command.kill('SIGKILL'); } catch(e){} } 
+            if (s.proxyRequest) { try { s.proxyRequest.destroy(); } catch(e){} } 
+            ACTIVE_STREAMS.delete(streamId);
+            setTimeout(checkTranscodeQueue, 2000); 
+        }
+    };
+    req.on('close', cleanup);
+    res.on('close', cleanup);
+    res.on('error', cleanup);
+
+    if (isNas) {
+        const parts = filePath.replace('nas://', '').split('/');
+        const nasId = parts[0];
+        const filename = parts.slice(1).join('/'); 
+        const nasNode = KNOWN_NAS_NODES.get(nasId);
+        
+        if (!nasNode) { cleanup(); return res.status(503).send("NAS Offline"); }
+
+        const nasUrl = `${nasNode.url}/file/${encodeURIComponent(filename)}`;
+
+        if (isDirectPlay) {
+            try {
+                const response = await axios({
+                    method: 'GET',
+                    url: nasUrl,
+                    responseType: 'stream',
+                    headers: {
+                        'Authorization': `Bearer ${nasNode.apiKey}`,
+                        'Range': req.headers.range || 'bytes=0-'
+                    }
+                });
+                streamInfo.proxyRequest = response.data; 
+                res.writeHead(response.status, response.headers);
+                response.data.pipe(res);
+                return;
+            } catch (e) {
+                cleanup(); return res.status(502).send("NAS Proxy Error");
+            }
+        } 
+        
+        else {
+            res.writeHead(200, { 'Content-Type': 'video/mp4' });
+
+            const ffmpegCommand = ffmpeg(nasUrl)
+                .inputOptions([
+                    '-headers', `Authorization: Bearer ${nasNode.apiKey}`,
+                    '-re'
+                ]);
+
+            if (startTime) ffmpegCommand.seekInput(startTime);
+
+            ffmpegCommand
+                .outputOptions([ '-map 0:v:0', `-map 0:a:${requestedTrack}?` ])
+                .videoCodec('libx264') 
+                .audioCodec('aac')
+                .format('mp4')
+                .outputOptions(['-movflags frag_keyframe+empty_moov', '-preset ultrafast', '-crf 28', '-tune zerolatency'])
+                .on('error', (err) => { if (err.message !== 'Output stream closed') console.error('FFmpeg Error:', err.message); cleanup(); });
+
+            streamInfo.command = ffmpegCommand;
+            ffmpegCommand.pipe(res, { end: true });
+            return;
+        }
+    }
+
+    if (!filePath || !existsSync(filePath)) { cleanup(); return res.status(404).send("File not found"); }
+    // if (filePath.startsWith(PRIVATE_ROOT) && req.user.role !== 'super_admin') { cleanup(); return res.status(403).send("Access Denied"); }
+
+    if (isDirectPlay) {
+        const stat = await fs.stat(filePath);
+        const range = req.headers.range;
+        if (range) {
+            const parts = range.replace(/bytes=/, "").split("-");
+            const start = parseInt(parts[0], 10);
+            const end = parts[1] ? parseInt(parts[1], 10) : stat.size - 1;
+            const chunksize = (end - start) + 1;
+            res.writeHead(206, { 'Content-Range': `bytes ${start}-${end}/${stat.size}`, 'Accept-Ranges': 'bytes', 'Content-Length': chunksize, 'Content-Type': 'video/mp4' });
+            createReadStream(filePath, { start, end }).pipe(res);
+        } else {
+            res.writeHead(200, { 'Content-Length': stat.size, 'Content-Type': 'video/mp4' });
+            createReadStream(filePath).pipe(res);
+        }
+    } 
+    else {
+        res.writeHead(200, { 'Content-Type': 'video/mp4' });
+        const ffmpegCommand = ffmpeg(filePath);
+        if (startTime) ffmpegCommand.seekInput(startTime);
+
+        ffmpegCommand
+            .outputOptions([ '-map 0:v:0', `-map 0:a:${requestedTrack}?` ])
+            .videoCodec('libx264') 
+            .audioCodec('aac')
+            .format('mp4')
+            .outputOptions(['-movflags frag_keyframe+empty_moov', '-preset ultrafast', '-crf 28', '-tune zerolatency'])
+            .on('error', (err) => { if (err.message !== 'Output stream closed') console.error('FFmpeg Error:', err.message); cleanup(); });
+
+        streamInfo.command = ffmpegCommand;
+        ffmpegCommand.pipe(res, { end: true });
+    }
+});
+
+app.post('/api/progress', verifyToken, async (req, res) => {
+    const { path: filePath, timestamp, duration } = req.body;
+    
+    const historyUser = req.user.username; 
+
+    await db.run(`INSERT INTO history (user_email, media_path, progress, duration, last_watched) 
+                  VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_email, media_path) 
+                  DO UPDATE SET progress = ?, duration = ?, last_watched = ?`, 
+                  [
+                      historyUser, 
+                      filePath, 
+                      timestamp, 
+                      duration, 
+                      new Date().toISOString(), 
+                      timestamp, 
+                      duration, 
+                      new Date().toISOString()
+                  ]);
+                  
+    res.json({ success: true });
+});
+
+app.post('/api/upload', verifyToken, (req, res, next) => { req.setTimeout(3600000); next(); }, upload.array('files'), async (req, res) => {
+    try {
+        if (!db) await initDB();
+        
+        if (!(await hasFreeSpace(USER_HOME))) throw new Error("Server disk is full");
+        
+        const files = req.files;
+        if (!files || files.length === 0) throw new Error("No files received");
+
+        let { type, seriesName, season, episode, title, isPrivate = false } = req.body;
+        
+        const wantsPrivate = isPrivate === 'true' || isPrivate === true;
+        const markAsPrivate = wantsPrivate ? 1 : 0;
+        const owner = wantsPrivate ? req.user.username : null;
+
+        const safeFolder = (str) => str ? str.replace(/[/\\?%*:|"<>]/g, '-').trim() : 'Unknown';
+        
+        let rootFolder;
+        if (wantsPrivate) {
+            rootFolder = path.join(PRIVATE_ROOT, safeFolder(req.user.username));
+        } else {
+            rootFolder = MEDIA_ROOT;
+        }
+
+        let targetDir;
+        if (type === 'series') {
+            const safeSeries = safeFolder(seriesName || 'Unknown Series');
+            const safeSeason = `Season ${parseInt(season) || 1}`;
+            targetDir = path.join(rootFolder, 'Series', safeSeries, safeSeason);
+        } else {
+            targetDir = path.join(rootFolder, 'Movies');
+        }
+
+        await fs.mkdir(targetDir, { recursive: true });
+        const results = [];
+        let episodeCounter = parseInt(episode) || 1;
+
+        for (const file of files) {
+            const safeFilename = decodeURIComponent(file.originalname);
+            const targetPath = path.join(targetDir, safeFilename);
+
+            try {
+                await fs.rename(file.path, targetPath);
+            } catch (err) {
+                await fs.copyFile(file.path, targetPath);
+                await fs.unlink(file.path);
+            }
+
+            const stats = await fs.stat(targetPath);
+            const { duration, poster, needsTranscode } = await extractMetadata(targetPath);
+            
+            let finalTitle = title || safeFilename;
+            let finalSeriesName = null, finalSeason = null, finalEpisode = null;
+
+            if (type === 'series') { 
+                finalSeriesName = seriesName; 
+                finalSeason = parseInt(season) || 1; 
+                finalEpisode = parseInt(episode) ? episodeCounter++ : (parseFilename(safeFilename).episode || 0); 
+            } else { 
+                if (!title) finalTitle = path.basename(safeFilename, path.extname(safeFilename)); 
+            }
+
+            const status = (needsTranscode && !isPrivate) ? 'pending' : 'completed';
+            
+            await db.run(`INSERT OR IGNORE INTO media 
+                (path, filename, title, type, series_name, season, episode, size, duration, poster, created_at, transcode_status, is_private, owner_username) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, 
+                [targetPath, safeFilename, finalTitle, type, finalSeriesName, finalSeason, finalEpisode, stats.size, duration, poster, stats.birthtime.toISOString(), status, markAsPrivate, owner]);
+            
+            results.push(safeFilename);
+        }
+
+        await logActivity(req.user.username, "UPLOAD", `Uploaded ${files.length} files`, req.ip);
+        res.json({ success: true, processed: results });
+        checkTranscodeQueue();
+
+    } catch (e) {
+        console.error("Upload Error:", e);
+        if (req.files) for (const f of req.files) if (existsSync(f.path)) await fs.unlink(f.path).catch(()=>{}); 
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.get('/api/media/info', verifyToken, async (req, res) => {
+    let { path: filePath } = req.query;
+    if (!filePath) return res.status(400).send("Path required");
+
+    try {
+        filePath = decodeURIComponent(filePath);
+    } catch (e) {
+        console.error("Path decoding failed", e);
+    }
+
+    console.log(`ℹ️ [Media Info] Probing: ${filePath}`);
+
+    const formatResponse = (metadata) => {
+        try {
+            const fileSize = metadata.format && metadata.format.size 
+                ? parseInt(metadata.format.size, 10) 
+                : 0;
+
+            const audioTracks = metadata.streams
+                .filter(s => s.codec_type === 'audio')
+                .map((s, i) => ({
+                    index: i,
+                    label: s.tags?.title || s.tags?.language || s.codec_name || `Audio ${i + 1}`,
+                    language: s.tags?.language || 'und',
+                    codec: s.codec_name
+                }));
+
+            const subtitleTracks = metadata.streams
+                .filter(s => s.codec_type === 'subtitle')
+                .map((s) => ({
+                    index: s.index,
+                    label: s.tags?.title || s.tags?.language || s.codec_name || `Subtitle ${s.index}`,
+                    language: s.tags?.language || 'en',
+                    codec: s.codec_name
+                }));
+
+            return { fileSize, audioTracks, subtitleTracks };
+        } catch (e) { 
+            console.error("Metadata parse error:", e);
+            return { fileSize: 0, audioTracks: [], subtitleTracks: [] }; 
+        }
+    };
+
+    if (filePath.startsWith('nas://')) {
+        const parts = filePath.replace('nas://', '').split('/');
+        const nasId = parts[0];
+        const filename = parts.slice(1).join('/');
+        const nasNode = KNOWN_NAS_NODES.get(nasId);
+
+        if (!nasNode) return res.status(503).json({ error: "NAS Offline" });
+
+        const fileUrl = `${nasNode.url}/file/${encodeURIComponent(filename)}`;
+        
+        const cmd = `ffprobe -v quiet -print_format json -show_streams -show_format -headers "Authorization: Bearer ${nasNode.apiKey}" "${fileUrl}"`;
+
+        exec(cmd, (error, stdout, stderr) => {
+            if (error) {
+                console.error("NAS Probe Error:", stderr);
+                return res.json({ fileSize: 0, audioTracks: [], subtitleTracks: [] });
+            }
+            try {
+                const metadata = JSON.parse(stdout);
+                res.json(formatResponse(metadata));
+            } catch (e) {
+                res.json({ fileSize: 0, audioTracks: [], subtitleTracks: [] });
+            }
+        });
+    } 
+    
+    else if (existsSync(filePath)) {
+        ffmpeg.ffprobe(filePath, (err, metadata) => {
+            if (err) {
+                console.error("FFprobe Error:", err.message);
+                return res.status(500).json({ error: "Probe failed" });
+            }
+            res.json(formatResponse(metadata));
+        });
+    } else {
+        console.error(`❌ File Not Found on Disk: ${filePath}`);
+        res.status(404).send("File not found on server disk");
+    }
+});
+
+app.post('/api/media/nas-action', verifyToken, async (req, res) => {
+    const { path: filePath, action } = req.body; 
+    
+    try {
+        if (!filePath) throw new Error("No file path provided");
+
+        if (action === 'archive') {
+            if (filePath.startsWith('nas://')) return res.status(400).json({ error: "Already on NAS" });
+            if (!existsSync(filePath)) return res.status(404).json({ error: "Local file not found" });
+
+            const stats = await fs.stat(filePath);
+            const targetNas = getBestNasNode(stats.size); 
+
+            if (!targetNas) throw new Error("No suitable NAS node available");
+
+            console.log(`📦 Manual Archive via cURL: ${filePath} -> ${targetNas.id}`);
+
+            const uploadUrl = `${targetNas.url}/archive`;
+
+            await new Promise((resolve, reject) => {
+                const child = spawn('curl', [
+                    '-s',
+                    '--connect-timeout', '10',
+                    '--max-time', '14400',
+                    '-H', `Authorization: Bearer ${targetNas.apiKey}`,
+                    '-F', `file=@${filePath}`,
+                    uploadUrl
+                ]);
+
+                let responseData = '';
+                child.stdout.on('data', (d) => { responseData += d.toString(); });
+                child.stderr.on('data', (d) => { console.error(`[cURL Manual] ${d.toString()}`); });
+
+                child.on('close', (code) => {
+                    if (code !== 0) return reject(new Error(`Upload failed (cURL code ${code})`));
+                    try {
+                        const json = JSON.parse(responseData);
+                        if (json.success) resolve();
+                        else reject(new Error(json.error || "NAS Rejected Upload"));
+                    } catch (e) {
+                        reject(new Error("Invalid response from NAS"));
+                    }
+                });
+            });
+
+            await fs.unlink(filePath);
+            const newPath = `nas://${targetNas.id}/${path.basename(filePath)}`;
+            
+            await db.run("UPDATE media SET path = ?, is_archived = 1 WHERE path = ?", [newPath, filePath]);
+            await db.run("UPDATE history SET media_path = ? WHERE media_path = ?", [newPath, filePath]);
+            
+            return res.json({ success: true, message: "Moved to NAS" });
+        }
+
+        else if (action === 'restore') {
+            if (!filePath.startsWith('nas://')) return res.status(400).json({ error: "File is not on NAS" });
+            if (!(await hasFreeSpace(MEDIA_ROOT))) throw new Error("Server disk full");
+
+            const parts = filePath.replace('nas://', '').split('/');
+            const nasId = parts[0];
+            const filename = parts.slice(1).join('/');
+            const nasNode = KNOWN_NAS_NODES.get(nasId);
+
+            if (!nasNode) throw new Error("Original NAS node offline");
+            if (nasNode.stats && nasNode.stats.nasBusy) {
+                return res.status(503).json({ error: "NAS is currently busy with max jobs." });
+            }
+
+            console.log(`♻️ Triggering Restore: ${filename}`);
+
+            const localDir = path.join(MEDIA_ROOT, 'Restored');
+            if (!existsSync(localDir)) await fs.mkdir(localDir, { recursive: true });
+            const localPath = path.join(localDir, filename);
+            const writer = createWriteStream(localPath);
+
+            try {
+                const response = await axios({
+                    method: 'GET',
+                    url: `${nasNode.url}/file/${encodeURIComponent(filename)}`,
+                    responseType: 'stream',
+                    headers: { 'Authorization': `Bearer ${nasNode.apiKey}` },
+                    timeout: 2 * 60 * 60 * 1000, // 👈 ADD THIS (1 Hour Timeout)
+                    maxContentLength: Infinity,
+                    maxBodyLength: Infinity
+                });
+
+                response.data.pipe(writer);
+
+                await new Promise((resolve, reject) => {
+                    writer.on('finish', resolve);
+                    writer.on('error', reject);
+                });
+
+                await axios.delete(`${nasNode.url}/file/${encodeURIComponent(filename)}`, {
+                    headers: { 'Authorization': `Bearer ${nasNode.apiKey}` }
+                });
+
+                await db.run("UPDATE media SET path = ?, is_archived = 0 WHERE path = ?", [localPath, filePath]);
+                await db.run("UPDATE history SET media_path = ? WHERE media_path = ?", [localPath, filePath]);
+
+                return res.json({ success: true, message: "Restored to Local" });
+            } catch (e) {
+                if (e.response && e.response.status === 503) {
+                    return res.status(503).json({ error: "NAS Busy: Queue full." });
+                }
+                throw e;
+            }
+        }
+        res.status(400).json({ error: "Invalid action" });
+    } catch (e) {
+        console.error("Move Failed:", e.message);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.get('/api/media/next', verifyToken, async (req, res) => {
+    const { path: currentPath } = req.query;
+    if (!currentPath) return res.status(400).json({ error: "Path required" });
+
+    try {
+        const current = await db.get("SELECT series_name, season, episode FROM media WHERE path = ?", currentPath);
+        
+        if (!current || !current.series_name) {
+            return res.json({ next: null }); 
+        }
+
+        console.log(`[AutoPlay] Looking for next episode of ${current.series_name} (Current: S${current.season} E${current.episode})`);
+
+        const privacyFilter = req.user.role === 'super_admin' ? "" : "AND is_private = 0";
+
+        const nextEpisode = await db.get(`
+            SELECT * FROM media 
+            WHERE series_name = ? 
+            AND (
+                (season = ? AND episode > ?) 
+                OR 
+                (season > ?)
+            )
+            ${privacyFilter} 
+            ORDER BY season ASC, episode ASC 
+            LIMIT 1
+        `, [
+            current.series_name, 
+            parseInt(current.season),
+            parseInt(current.episode),
+            parseInt(current.season)
+        ]);
+        
+        if (nextEpisode) {
+            console.log(`[AutoPlay] Found: ${nextEpisode.filename} (S${nextEpisode.season} E${nextEpisode.episode})`);
+        } else {
+            console.log(`[AutoPlay] No next episode found.`);
+        }
+
+        res.json({ next: nextEpisode || null });
+
+    } catch (e) {
+        console.error("AutoPlay Error:", e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.post('/api/media/move', verifyToken, async (req, res) => {
+    const { path: srcPath, action } = req.body; 
+    try {
+        if (!srcPath || !existsSync(srcPath)) throw new Error("Source file not found");
+        if (srcPath.startsWith(PRIVATE_ROOT)) return res.status(403).json({ error: "Private Vault items cannot be moved." });
+        let destPath = '', isArchived = 0;
+        if (action === 'archive') { destPath = srcPath.replace(MEDIA_ROOT, EXTERNAL_ROOT); isArchived = 1; } 
+        else if (action === 'restore') { destPath = srcPath.replace(EXTERNAL_ROOT, MEDIA_ROOT); isArchived = 0; } 
+        await fs.rename(srcPath, destPath).catch(async()=>{ await fs.copyFile(srcPath, destPath); await fs.unlink(srcPath); });
+        await db.run("UPDATE media SET path = ?, is_archived = ?, is_private = 0 WHERE path = ?", [destPath, isArchived, srcPath]);
+        await db.run("UPDATE history SET media_path = ? WHERE media_path = ?", [destPath, srcPath]);
+        await logActivity(req.user.username, "MOVE", `Moved ${path.basename(srcPath)} to ${path.basename(destPath)}`, req.ip);
+        res.json({ success: true, newPath: destPath });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Enable Archiving/Restoring Private Files (/api/media/move)
+// app.post('/api/media/move', verifyToken, async (req, res) => {
+//     const { path: srcPath, action } = req.body; 
+//     try {
+//         if (!srcPath || !existsSync(srcPath)) throw new Error("Source file not found");
+
+//         // 👇 FETCH ITEM TO CHECK OWNERSHIP
+//         const item = await db.get("SELECT owner_username, is_private FROM media WHERE path = ?", srcPath);
+//         if (!item) return res.status(404).json({ error: "Media not found in DB" });
+
+//         // 👇 PERMISSION CHECK
+//         if (item.is_private === 1 && item.owner_username !== req.user.username && req.user.role !== 'super_admin') {
+//             return res.status(403).json({ error: "Access Denied" });
+//         }
+
+//         let destPath = '', isArchived = 0;
+        
+//         // 👇 LOGIC FOR PATH CALCULATION
+//         if (action === 'archive') { 
+//             // Move from StreamMedia_Private/User/Movie.mp4 -> StreamMedia_External/Movie.mp4 (Or keep user folder structure)
+//             // For simplicity, let's keep the folder structure mapping
+//             destPath = srcPath.replace(MEDIA_ROOT, EXTERNAL_ROOT).replace(PRIVATE_ROOT, EXTERNAL_ROOT); 
+//             isArchived = 1; 
+//         } 
+//         else if (action === 'restore') { 
+//             // Restore back to original root
+//             if (item.is_private) {
+//                 destPath = srcPath.replace(EXTERNAL_ROOT, path.join(PRIVATE_ROOT, item.owner_username || ''));
+//             } else {
+//                 destPath = srcPath.replace(EXTERNAL_ROOT, MEDIA_ROOT);
+//             }
+//             isArchived = 0; 
+//         } 
+
+//         // Ensure Destination Folder Exists
+//         const destDir = path.dirname(destPath);
+//         if (!existsSync(destDir)) await fs.mkdir(destDir, { recursive: true });
+
+//         await fs.rename(srcPath, destPath).catch(async()=>{ await fs.copyFile(srcPath, destPath); await fs.unlink(srcPath); });
+        
+//         // Update DB
+//         await db.run("UPDATE media SET path = ?, is_archived = ? WHERE path = ?", [destPath, isArchived, srcPath]);
+//         await db.run("UPDATE history SET media_path = ? WHERE media_path = ?", [destPath, srcPath]);
+        
+//         await logActivity(req.user.username, "MOVE", `Moved ${path.basename(srcPath)}`, req.ip);
+//         res.json({ success: true, newPath: destPath });
+
+//     } catch (e) { res.status(500).json({ error: e.message }); }
+// });
+
+// 👇 Removes now-empty season/series folders after a delete, walking up but never past a library root
+const LIBRARY_ROOTS = [MEDIA_ROOT, EXTERNAL_ROOT, PRIVATE_ROOT];
+async function cleanupEmptyDirs(startDir) {
+    let dir = startDir;
+    while (LIBRARY_ROOTS.some(root => dir.startsWith(root)) && !LIBRARY_ROOTS.includes(dir)) {
+        try {
+            const entries = await fs.readdir(dir);
+            if (entries.length > 0) break;
+            await fs.rmdir(dir);
+            dir = path.dirname(dir);
+        } catch (e) { break; }
+    }
+}
+
+app.delete('/api/media', verifyToken, async (req, res) => {
+    const { path: filePath } = req.body;
+    try {
+        if (!filePath) return res.status(400).json({ error: "No path provided" });
+
+        // 👇 FETCH ITEM INFO FIRST
+        const item = await db.get("SELECT owner_username, is_private, poster FROM media WHERE path = ?", filePath);
+        if (!item) return res.status(404).json({ error: "File not found" });
+
+        // 👇 PERMISSION CHECK
+        // Allow if:
+        // 1. User is Super Admin
+        // 2. File is Public (is_private = 0)
+        // 3. User owns the file
+        const isOwner = item.owner_username === req.user.username;
+        if (item.is_private === 1 && !isOwner && req.user.role !== 'super_admin') {
+             return res.status(403).json({ error: "Access Denied: You do not own this file." });
+        }
+
+        await db.run('DELETE FROM media WHERE path = ?', [filePath]);
+        await db.run('DELETE FROM history WHERE media_path = ?', [filePath]);
+
+        if (existsSync(filePath)) await fs.unlink(filePath).catch(() => {});
+        if (item.poster) {
+            const thumbPath = path.join(THUMB_FOLDER, item.poster);
+            if (existsSync(thumbPath)) await fs.unlink(thumbPath).catch(() => {});
+        }
+        await cleanupEmptyDirs(path.dirname(filePath));
+
+        await logActivity(req.user.username, "DELETE", `Deleted ${path.basename(filePath)}`, req.ip);
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/series/:name', verifyToken, async (req, res) => {
+    const seriesName = req.params.name;
+    try {
+        const rows = await db.all("SELECT path, owner_username, is_private, poster FROM media WHERE series_name = ?", seriesName);
+        if (!rows.length) return res.status(404).json({ error: "Series not found" });
+
+        const deletable = rows.filter(item =>
+            req.user.role === 'super_admin' || item.is_private !== 1 || item.owner_username === req.user.username);
+        if (!deletable.length) return res.status(403).json({ error: "Access Denied: You do not own any episodes in this series." });
+
+        const dirsToCheck = new Set();
+        for (const item of deletable) {
+            await db.run('DELETE FROM media WHERE path = ?', [item.path]);
+            await db.run('DELETE FROM history WHERE media_path = ?', [item.path]);
+            if (existsSync(item.path)) await fs.unlink(item.path).catch(() => {});
+            if (item.poster) {
+                const thumbPath = path.join(THUMB_FOLDER, item.poster);
+                if (existsSync(thumbPath)) await fs.unlink(thumbPath).catch(() => {});
+            }
+            dirsToCheck.add(path.dirname(item.path));
+        }
+        for (const dir of dirsToCheck) await cleanupEmptyDirs(dir);
+
+        await logActivity(req.user.username, "DELETE", `Deleted series ${seriesName} (${deletable.length} episodes)`, req.ip);
+        res.json({ success: true, deleted: deletable.length, skipped: rows.length - deletable.length });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.patch('/api/media/title', verifyToken, async (req, res) => {
+    const { path: filePath, title } = req.body;
+    try {
+        if (!filePath || !title?.trim()) return res.status(400).json({ error: "Path and title are required" });
+
+        const item = await db.get("SELECT owner_username, is_private FROM media WHERE path = ?", filePath);
+        if (!item) return res.status(404).json({ error: "File not found" });
+
+        const isOwner = item.owner_username === req.user.username;
+        if (item.is_private === 1 && !isOwner && req.user.role !== 'super_admin') {
+            return res.status(403).json({ error: "Access Denied: You do not own this file." });
+        }
+
+        await db.run("UPDATE media SET title = ? WHERE path = ?", [title.trim(), filePath]);
+        await logActivity(req.user.username, "EDIT", `Renamed ${path.basename(filePath)} to "${title.trim()}"`, req.ip);
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.patch('/api/series/:name', verifyToken, async (req, res) => {
+    const seriesName = req.params.name;
+    const { newName } = req.body;
+    try {
+        if (!newName?.trim()) return res.status(400).json({ error: "New name is required" });
+
+        const rows = await db.all("SELECT path, owner_username, is_private FROM media WHERE series_name = ?", seriesName);
+        if (!rows.length) return res.status(404).json({ error: "Series not found" });
+
+        const editable = rows.filter(item =>
+            req.user.role === 'super_admin' || item.is_private !== 1 || item.owner_username === req.user.username);
+        if (!editable.length) return res.status(403).json({ error: "Access Denied: You do not own any episodes in this series." });
+
+        for (const item of editable) {
+            await db.run("UPDATE media SET series_name = ? WHERE path = ?", [newName.trim(), item.path]);
+        }
+
+        await logActivity(req.user.username, "EDIT", `Renamed series "${seriesName}" to "${newName.trim()}"`, req.ip);
+        res.json({ success: true, renamed: editable.length, skipped: rows.length - editable.length });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/torrents', verifyToken, (req, res) => {
+    const list = torrentClient.torrents.map(t => ({
+        hash: t.infoHash,
+        name: t.name || "Fetching Metadata...", 
+        progress: t.progress * 100,
+        downloadSpeed: t.downloadSpeed,
+        uploadSpeed: t.uploadSpeed,
+        numPeers: t.numPeers,
+        size: t.length,
+        downloaded: t.downloaded,
+        timeRemaining: t.timeRemaining,
+        state: t.paused ? 'paused' : (t.done ? 'completed' : 'downloading')
+    }));
+
+    if (list.length > 0) {
+        const t = list[0]; 
+        console.log(`📊 [STATUS] ${list.length} Torrents | First: ${t.name} | Peers: ${t.numPeers} | Speed: ${(t.downloadSpeed/1024).toFixed(0)} KB/s`);
+    } else {
+        console.log("📊 [STATUS] No active torrents");
+    }
+
+    res.json(list);
+});
+
+app.post('/api/torrents', verifyToken, async (req, res) => {
+    const { magnet } = req.body;
+    
+    console.log("➕ [DEBUG] API Request received. Magnet length:", magnet ? magnet.length : 'null');
+
+    if (!magnet || !magnet.startsWith('magnet:?')) {
+        console.error("❌ [DEBUG] Invalid magnet link format");
+        return res.status(400).json({ error: "Invalid magnet link" });
+    }
+
+    try {
+        const wantsPrivate = isPrivate === true || isPrivate === 'true'; // Handle boolean or string
+        const isPrivateInt = wantsPrivate ? 1 : 0;
+        const owner = wantsPrivate ? req.user.username : null; // 👈 Capture Owner
+
+        console.log(`👤 Adding Torrent | User: ${req.user.username} | Private: ${wantsPrivate}`);
+        
+        // Pass owner to function
+        addTorrentToClient(magnet, true, isPrivateInt, owner);
+        
+        res.json({ success: true, message: wantsPrivate ? "Added to your Private Vault" : "Torrent added" });
+    } catch (e) {
+        console.error("🔥 [DEBUG] API Exception:", e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.post('/api/torrents/:hash/:action', verifyToken, async (req, res) => {
+    const { hash, action } = req.params;
+    const torrent = torrentClient.get(hash);
+
+    if (!torrent && action !== 'remove') return res.status(404).json({ error: "Torrent not found" });
+
+    try {
+        if (action === 'pause') {
+            torrent.pause();
+            if (db) await db.run("UPDATE torrents SET status = 'paused' WHERE hash = ?", hash);
+        } 
+        else if (action === 'resume') {
+            torrent.resume();
+            if (db) await db.run("UPDATE torrents SET status = 'downloading' WHERE hash = ?", hash);
+        } 
+        else if (action === 'remove') {
+            if (torrent) {
+                torrent.destroy({ destroyStore: true }); 
+            }
+            if (db) await db.run("DELETE FROM torrents WHERE hash = ?", hash);
+        }
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.get('/api/telegram/files', verifyToken, async (req, res) => { try { const files = await db.all("SELECT * FROM telegram_files ORDER BY message_id DESC"); res.json(files); } catch (e) { res.status(500).json({ error: e.message }); } });
+app.post('/api/telegram/download', verifyToken, async (req, res) => { const { message_id } = req.body; try { if (!(await hasFreeSpace(USER_HOME))) return res.status(507).json({ error: "Insufficient disk space" }); await db.run("UPDATE telegram_files SET status = 'queued', downloaded_size = 0 WHERE message_id = ?", [message_id]); processDownloadQueue(); res.json({ success: true, message: "Download Queued" }); } catch (e) { res.status(500).json({ error: e.message }); } });
+app.post('/api/telegram/stop', verifyToken, async (req, res) => { const { message_id } = req.body; const currentItem = await db.get("SELECT message_id FROM telegram_files WHERE status = 'downloading'"); if (currentItem && currentItem.message_id === message_id) { cancelCurrentDownload = true; res.json({ success: true, message: "Stop signal sent" }); } else { await db.run("UPDATE telegram_files SET status = 'stopped' WHERE message_id = ?", message_id); res.json({ success: true, message: "Removed from queue" }); } });
+app.get('/api/resync-db', async (req, res) => { try { const result = await db.run(`DELETE FROM telegram_files WHERE size = '[object Object]' OR size LIKE '%object%' OR size IS NULL`); res.send(`Deleted ${result.changes} bad entries.`); } catch (e) { res.status(500).send(e.message); } });
+app.get('/api/apk', (req, res) => { if (existsSync(APK_PATH)) res.download(APK_PATH, "StreamPi-Client.apk"); else res.status(404).send("APK file not found."); });
+app.get('/api/worker-script', (req, res) => {
+    const scriptPath = path.join(__dirname, 'worker_dist.zip'); 
+    if (existsSync(scriptPath)) res.download(scriptPath, "streampi-worker.zip");
+    else res.status(404).send("Worker script package not found on server.");
+});
+
+app.get('*', (req, res) => { if (req.path.startsWith('/api')) return res.status(404).send('Not Found'); if (existsSync(path.join(CLIENT_BUILD_PATH, 'index.html'))) res.sendFile(path.join(CLIENT_BUILD_PATH, 'index.html')); else res.send('StreamPi Server is running. Client build not found.'); });
+
+app.use((err, req, res, next) => {
+    if (err) {
+        console.error("🔥 Global Error Caught:", err.message);
+        
+        if (req.file && existsSync(req.file.path)) fs.unlink(req.file.path, () => {});
+        if (req.files) {
+            if (Array.isArray(req.files)) {
+                req.files.forEach(f => { if (existsSync(f.path)) fs.unlink(f.path, () => {}); });
+            }
+        }
+
+        if (err.code === 'LIMIT_FILE_SIZE') return res.status(413).send('File too large');
+        if (err.message.includes('no space left on device') || err.code === 'ENOSPC') {
+            return res.status(507).send('Server Disk Full');
+        }
+        return res.status(500).send('Upload failed');
+    }
+    next();
+});
+
+// --- LIBRARY SCANNER ---
+const scanLibrary = async () => {
+    if (!db) return;
+    const roots = [
+        { path: path.join(MEDIA_ROOT, 'Movies'), archived: 0, private: 0 },
+        { path: path.join(MEDIA_ROOT, 'Series'), archived: 0, private: 0 },
+        { path: path.join(EXTERNAL_ROOT, 'Movies'), archived: 1, private: 0 },
+        { path: path.join(EXTERNAL_ROOT, 'Series'), archived: 1, private: 0 }
+    ];
+
+    for (const r of roots) await fs.mkdir(r.path, { recursive: true }).catch(()=>{});
+
+    const processDir = async (dir, isArchived, isPrivate) => {
+        if (!existsSync(dir)) return;
+        const entries = await fs.readdir(dir, { withFileTypes: true });
+        for (const entry of entries) {
+            const fullPath = path.join(dir, entry.name);
+            if (entry.isDirectory() && !entry.name.startsWith('.')) {
+                await processDir(fullPath, isArchived, isPrivate);
+            }
+            else if (VIDEO_EXTS.has(path.extname(entry.name).toLowerCase())) {
+                const exists = await db.get("SELECT path FROM media WHERE path = ?", fullPath);
+                if (!exists) {
+                    const meta = parseFilename(entry.name);
+                    const stats = await fs.stat(fullPath);
+                    const { duration, poster, needsTranscode } = await extractMetadata(fullPath);
+                    await db.run(`INSERT OR IGNORE INTO media 
+                    (path, filename, title, type, series_name, season, episode, size, duration, poster, created_at, transcode_status, is_archived, is_private) 
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, 
+                    [fullPath, entry.name, meta.title, meta.type, meta.series_name, meta.season, meta.episode, stats.size, duration, poster, stats.birthtime.toISOString(), needsTranscode ? 'pending' : 'completed', isArchived, isPrivate]);
+                } 
+            }
+        }
+    };
+    for (const r of roots) await processDir(r.path, r.archived, r.private);
+};
+
+const updateServerLocation = async (protocol = 'http', port = PORT) => { 
+    if (!isFirebaseActive) return; 
+    const url = MANUAL_PUBLIC_URL || `${protocol}://${getLocalIp()}:${port}`; 
+    const newConfig = { url: url, ip: getLocalIp(), port: port, protocol: protocol }; 
+    const hasChanged = !lastKnownConfig || lastKnownConfig.url !== newConfig.url; 
+    if (!hasChanged) return; 
+    try { 
+        const db = admin.database(); const ref = db.ref('serverConfig'); 
+        await ref.set({ ...newConfig, lastUpdated: Date.now() }); 
+        lastKnownConfig = newConfig; 
+        await log(`📡 Server location updated: ${url}`); 
+    } catch (e) { await log(`Failed to update server location in Firebase: ${e.message}`, 'ERROR'); } 
+};
+
+const startServer = async () => {
+    try {
+        if (existsSync(TEMP_DIR)) {
+            console.log("🧹 Cleaning Temp Directory on Startup...");
+            const files = await fs.readdir(TEMP_DIR);
+            for (const file of files) {
+                await fs.unlink(path.join(TEMP_DIR, file)).catch(() => {});
+            }
+        }
+    } catch (e) {
+        console.error("Warning: Could not clean temp dir:", e.message);
+    }
+
+    await initDB();
+    try {
+        const stuck = await db.run("UPDATE telegram_files SET status = 'queued' WHERE status = 'downloading'");
+        if (stuck.changes > 0) {
+            console.log(`🔄 Rescheduled ${stuck.changes} interrupted Telegram downloads.`);
+        }
+    } catch (e) {
+        console.error("Failed to reset Telegram queue:", e.message);
+    }
+    
+    if (existsSync(SERVICE_ACCOUNT_PATH)) {
+        try {
+            const serviceAccount = JSON.parse(await fs.readFile(SERVICE_ACCOUNT_PATH, 'utf8'));
+            admin.initializeApp({ credential: admin.credential.cert(serviceAccount), databaseURL: FIREBASE_DB_URL });
+            isFirebaseActive = true; 
+            console.log("🔒 Security: Firebase Admin initialized.");
+            
+            await initSecretsManager(); 
+        } catch (e) { console.error("Firebase Init Failed:", e); }
+    }
+
+    await initTelegramListener();
+    await restoreTorrents();
+
+    setInterval(cleanOldTempFiles, 60 * 60 * 1000); 
+    setInterval(checkTranscodeQueue, 30000); 
+    checkTranscodeQueue(); 
+    initNodeDiscoveryListener();
+    startNodeHealthCheck();
+    setInterval(checkNasHealth, 2000);
+
+    const httpServer = app.listen(PORT, '0.0.0.0', () => console.log(`🚀 HTTP Server running on port ${PORT}`));
+    httpServer.setTimeout(28800000); 
+    httpServer.keepAliveTimeout = 28800000;
+    httpServer.headersTimeout = 28800001;
+    
+    if (existsSync(SSL_KEY_PATH) && existsSync(SSL_CERT_PATH)) { 
+        try { 
+            const httpsServer = https.createServer({ key: await fs.readFile(SSL_KEY_PATH), cert: await fs.readFile(SSL_CERT_PATH) }, app).listen(HTTPS_PORT, '0.0.0.0', () => console.log(`🔒 HTTPS Server running on port ${HTTPS_PORT}`)); 
+            
+            httpsServer.setTimeout(28800000);
+            httpsServer.keepAliveTimeout = 28800000;
+            httpsServer.headersTimeout = 28800001;
+        } catch(e) {} 
+    }
+
+    await updateServerLocation();
+    setInterval(updateServerLocation, 5 * 60 * 1000);
+    scanLibrary();
+
+    setInterval(async () => {
+        if (!db) return;
+        const timeoutThreshold = Date.now() - (7 * 24 * 60 * 60 * 1000); // 7 Days Inactivity
+
+        try {
+            const expiredSessions = await db.all("SELECT * FROM sessions WHERE last_active < ?", timeoutThreshold);
+
+            for (const session of expiredSessions) {
+                console.log(`💤 Session timed out: ${session.username}`);
+                await logActivity(
+                    session.username, 
+                    "OFFLINE", 
+                    "Session expired (Inactivity)", 
+                    session.ip
+                );
+            }
+
+            if (expiredSessions.length > 0) {
+                await db.run("DELETE FROM sessions WHERE last_active < ?", timeoutThreshold);
+            }
+        } catch (e) {
+            console.error("Session cleanup error:", e);
+        }
+    }, 60 * 60000); 
+};
+
+startServer();
