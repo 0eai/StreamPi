@@ -137,3 +137,40 @@ dist
 # Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# ─────────────────────────────────────────────────────────────────────────────
+# StreamPi additions
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Secrets. Every one of these is a live credential; the repo is public.
+#   service-account.json  full Firebase admin access to the project
+#   node_config.json      a node's apiKey — see node_config.json.example
+#   *.jks / keystore.*    the Android release signing identity
+server/service-account.json
+node/node_config.json
+*.jks
+*.keystore
+keystore.properties
+local.properties
+*.key
+*.pem
+# ...except the local CA certificate, which is a public cert the client ships on purpose.
+!web_client/public/streampi-local-ca.pem
+
+# Runtime data, not source: the media library (tens of GB), the SQLite DB holding
+# user credentials and live sessions, the published APK, server logs, temp uploads.
+server_data/
+
+# Android / Gradle
+.gradle/
+.kotlin/
+.android/
+build/
+captures/
+.externalNativeBuild
+.cxx
+*.iml
+
+# Editor state
+.idea/
+.vscode/
