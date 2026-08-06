@@ -143,9 +143,15 @@ vite.config.ts.timestamp-*
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Secrets. Every one of these is a live credential; the repo is public.
+#   server/.env           Telegram api_id/api_hash/session — see .env.example
 #   service-account.json  full Firebase admin access to the project
 #   node_config.json      a node's apiKey — see node_config.json.example
 #   *.jks / keystore.*    the Android release signing identity
+#
+# .env / .env.* are already covered by the dotenv block further up, with .env.example
+# re-included. server/config.json is listed because it used to be tracked and did leak a
+# live Telegram session — keeping the rule means a stray copy can't come back.
+server/config.json
 server/service-account.json
 node/node_config.json
 *.jks

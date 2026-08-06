@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import admin from 'firebase-admin';
-import { externalConfig } from './config.js';
+import { KUNJI_AUDIENCE } from './config.js';
 
 const KUNJI_SESSION_TTL_MS = 2 * 60 * 1000;
 export const KUNJI_SESSIONS = new Map(); // sessionId -> { status, sub, claims, unsub, approvedAt }
@@ -13,7 +13,7 @@ const kunjiDetach = (sessionId) => {
 };
 
 export async function startKunjiSession(scope) {
-    const audience = (externalConfig.kunji && externalConfig.kunji.audience) || '';
+    const audience = KUNJI_AUDIENCE;
     const sessionId = kunjiToken(16);
     const challenge = kunjiToken(32);
     const expiresAt = Date.now() + KUNJI_SESSION_TTL_MS;

@@ -7,8 +7,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Anchor for every path that needs to be relative to the server/ directory itself
-// (config.json, the web client build, the worker script zip) — computed once here
-// so no other file has to re-derive its own __dirname walk-up.
+// (the web client build, the worker script zip) — computed once here so no other file has
+// to re-derive its own __dirname walk-up. Note that src/env.js deliberately does NOT use
+// this, to avoid importing the mkdir side effect below into the gen_session.js one-off.
 export const SERVER_ROOT = path.join(__dirname, '..');
 
 export const USER_HOME = path.join(os.homedir(), 'Projects/streampi/server_data');

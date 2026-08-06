@@ -4,7 +4,7 @@ import axios from 'axios';
 import { db, initDB, logActivity } from '../db.js';
 import { verifyToken } from '../middleware.js';
 import { hashPassword, hashPasswordLegacy, generateSalt } from '../cryptoHelpers.js';
-import { externalConfig } from '../config.js';
+import { KUNJI_CALLBACK_URL, KUNJI_AUDIENCE } from '../config.js';
 import { KUNJI_SESSIONS, KUNJI_RECENTLY_APPROVED, startKunjiSession } from '../kunjiRelay.js';
 import { STREAM_TOKENS } from '../state.js';
 import { isFirebaseActive } from '../firebaseBootstrap.js';
@@ -214,9 +214,8 @@ router.post('/api/auth/logout', verifyToken, async (req, res) => {
 });
 
 router.get('/api/auth/kunji/config', (req, res) => {
-    const kunjiCfg = externalConfig.kunji || {};
-    if (!kunjiCfg.callbackUrl) return res.status(503).json({ error: 'Kunji auth not configured on this server' });
-    res.json({ callbackUrl: kunjiCfg.callbackUrl, audience: kunjiCfg.audience || '' });
+    if (!KUNJI_CALLBACK_URL) return res.status(503).json({ error: 'Kunji auth not configured on this server' });
+    res.json({ callbackUrl: KUNJI_CALLBACK_URL, audience: KUNJI_AUDIENCE });
 });
 
 router.post('/api/auth/kunji/session', async (req, res) => {

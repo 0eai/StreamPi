@@ -28,9 +28,9 @@ import { getDatabase } from 'firebase-admin/database';
 import { randomBytes } from 'node:crypto';
 import { verifyAssertion } from './verify.js';
 
-// Same RTDB instance the rest of streampi already uses (server/config.json's
-// firebase_db_url / node/index.js's DEFAULT_DATABASE_URL). Cloud Functions don't share
-// that config file, so it's restated here explicitly rather than inferred.
+// Same RTDB instance the rest of streampi already uses (server/.env's FIREBASE_DB_URL /
+// node/config.js's DEFAULT_DATABASE_URL). Cloud Functions don't share that config, so it's
+// restated here explicitly rather than inferred. Not a secret — the web client ships it too.
 const DATABASE_URL = 'https://aks-streampi-default-rtdb.asia-southeast1.firebasedatabase.app';
 
 initializeApp({ databaseURL: DATABASE_URL });
