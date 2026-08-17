@@ -17,6 +17,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -32,6 +34,7 @@ import com.example.streampitv.ui.components.ItemActionsSheet
 import com.example.streampitv.ui.components.SharePanel
 import com.example.streampitv.ui.components.PosterCard
 import com.example.streampitv.util.catching
+import com.example.streampitv.util.pollWithBackoff
 import com.example.streampitv.util.isNasOffline
 import com.example.streampitv.util.nasOfflineNotice
 import kotlinx.coroutines.delay
@@ -43,6 +46,8 @@ fun SeriesDetailScreen(
     series: SeriesItem,
     serverUrl: String,
     token: String,
+    /** Hoisted so scroll, focus and the refetched episode list survive playback. */
+    state: SeriesDetailState,
     onPlayEpisode: (VideoItem) -> Unit,
     onBack: () -> Unit
 ) {
@@ -52,10 +57,10 @@ fun SeriesDetailScreen(
     val api = remember(serverUrl) { ApiClient.of(serverUrl) }
     val bearer = remember(token) { "Bearer $token" }
 
-    // A NAS action rewrites the media row's path (nas://node/file <-> local path), so the
-    // episode list we were handed goes stale in a way that would break playback. Rather
-    // than patch it locally, refetch the library and take the authoritative paths.
-    var episodes by remember(series.title) { mutableStateOf(series.episodes) }
+    // Adopt (or reset) the retained state for this show. Called during composition rather than
+    // from an effect so the very first frame already renders the right episodes.
+    state.forSeries(series.title, series.episodes)
+
     var nasBusyPath by remember { mutableStateOf<String?>(null) }
     var nasNotice by remember { mutableStateOf<String?>(null) }
     var actionsFor by remember { mutableStateOf<VideoItem?>(null) }
@@ -63,14 +68,21 @@ fun SeriesDetailScreen(
     // Target plus the label to show for it, so one panel serves both a single episode and the
     // whole series without SharePanel having to know which it is.
     var shareFor by remember { mutableStateOf<Pair<ShareTarget, String>?>(null) }
-    // Same live poll as Home: an episode list can sit open while its node goes down.
-    var availableNasNodes by remember(serverUrl, token) { mutableStateOf<Set<String>?>(null) }
+
+    // Focus restoration on return from playback, mirroring HomeScreen. Latched so it only
+    // fires once per entry rather than fighting the user on every recomposition.
+    val restoreFocus = remember { FocusRequester() }
+    var focusSettled by remember { mutableStateOf(false) }
+    LaunchedEffect(state.episodes, state.focusKey) {
+        if (focusSettled || state.focusKey == null) return@LaunchedEffect
+        if (state.episodes.none { it.path == state.focusKey }) return@LaunchedEffect
+        runCatching { restoreFocus.requestFocus() }
+        focusSettled = true
+    }
 
     LaunchedEffect(serverUrl, token) {
-        while (true) {
-            catching { api.nasAvailability(bearer) }
-                .onSuccess { availableNasNodes = it.available.toSet() }
-            delay(10_000)
+        pollWithBackoff(baseMs = 10_000) {
+            state.availableNasNodes = api.nasAvailability(bearer).available.toSet()
         }
     }
 
@@ -83,7 +95,7 @@ fun SeriesDetailScreen(
 
     /** Mirrors HomeScreen: an episode on a downed node can be neither streamed nor restored. */
     fun playEpisode(v: VideoItem) {
-        if (isNasOffline(v, availableNasNodes)) {
+        if (isNasOffline(v, state.availableNasNodes)) {
             nasNotice = nasOfflineNotice(v)
             return
         }
@@ -92,7 +104,7 @@ fun SeriesDetailScreen(
 
     fun runNasAction(v: VideoItem) {
         if (nasBusyPath != null) return
-        if (isNasOffline(v, availableNasNodes)) {
+        if (isNasOffline(v, state.availableNasNodes)) {
             nasNotice = nasOfflineNotice(v)
             return
         }
@@ -106,7 +118,7 @@ fun SeriesDetailScreen(
                         catching { api.getLibrary(bearer) }
                             .onSuccess { lib ->
                                 lib.series.firstOrNull { it.title == series.title }
-                                    ?.let { episodes = it.episodes }
+                                    ?.let { state.episodes = it.episodes }
                             }
                     }
                 }
@@ -118,7 +130,7 @@ fun SeriesDetailScreen(
     suspend fun refetch() {
         catching { api.getLibrary(bearer) }
             .onSuccess { lib ->
-                lib.series.firstOrNull { it.title == series.title }?.let { episodes = it.episodes }
+                lib.series.firstOrNull { it.title == series.title }?.let { state.episodes = it.episodes }
             }
     }
 
@@ -187,13 +199,13 @@ fun SeriesDetailScreen(
                 Spacer(modifier = Modifier.width(20.dp))
                 Column(Modifier.weight(1f)) {
                     Text(series.title, color = Color.White, fontSize = 32.sp, fontWeight = FontWeight.Bold)
-                    Text("${episodes.size} Episodes", color = Color.Gray, fontSize = 16.sp)
+                    Text("${state.episodes.size} Episodes", color = Color.Gray, fontSize = 16.sp)
                 }
                 // Whole-show actions live on this header rather than on Home's series cards,
                 // which deliberately have no options menu ("a series card stands for a show,
                 // not a file"). Hidden when every episode is in the private vault, since the
                 // server shares only the public ones and 404s when there are none.
-                if (episodes.any { it.is_private == 0 }) {
+                if (state.episodes.any { it.is_private == 0 }) {
                     FocusableItem(
                         onClick = { shareFor = ShareTarget.Series(series.title) to series.title },
                         modifier = Modifier.height(44.dp).width(180.dp)
@@ -233,20 +245,34 @@ fun SeriesDetailScreen(
             // Episodes Grid
             LazyVerticalGrid(
                 columns = GridCells.Fixed(5),
+                // Hoisted, so returning from an episode keeps the scroll position instead of
+                // jumping back to episode 1 — the difference is stark on a long series.
+                state = state.gridState,
                 horizontalArrangement = Arrangement.spacedBy(20.dp),
                 verticalArrangement = Arrangement.spacedBy(20.dp),
                 contentPadding = PaddingValues(bottom = 40.dp)
             ) {
-                items(episodes) { episode ->
+                items(state.episodes, key = { it.path }) { episode ->
                     // Ensure the episode carries the series name for the player header.
                     val displayEpisode = episode.copy(series_name = series.title)
                     PosterCard(
                         item = displayEpisode,
                         serverUrl = serverUrl,
-                        onClick = { playEpisode(displayEpisode) },
-                        nasOffline = isNasOffline(displayEpisode, availableNasNodes),
+                        onClick = {
+                            // Remembered before navigating, so focus can come back here.
+                            state.focusKey = episode.path
+                            playEpisode(displayEpisode)
+                        },
+                        nasOffline = isNasOffline(displayEpisode, state.availableNasNodes),
                         onMenu = { actionsFor = displayEpisode },
-                        busy = nasBusyPath == episode.path
+                        busy = nasBusyPath == episode.path,
+                        // Attached only to the card we left from. requestFocus is wrapped
+                        // because the target may not be laid out yet on the first frame.
+                        modifier = if (episode.path == state.focusKey) {
+                            Modifier.focusRequester(restoreFocus)
+                        } else {
+                            Modifier
+                        }
                     )
                 }
             }
@@ -271,7 +297,7 @@ fun SeriesDetailScreen(
                 onNasAction = { confirmSeriesDelete = false },
                 onDelete = { deleteWholeSeries() },
                 onDismiss = { confirmSeriesDelete = false },
-                deleteWarning = "All ${episodes.size} episodes will be erased from the server's " +
+                deleteWarning = "All ${state.episodes.size} episodes will be erased from the server's " +
                     "disk, along with their posters and watch history. This cannot be undone. " +
                     "Episodes you do not own are skipped.",
                 showNasRow = false

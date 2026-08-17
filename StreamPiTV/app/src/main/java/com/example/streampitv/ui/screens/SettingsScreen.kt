@@ -26,6 +26,7 @@ import com.example.streampitv.data.MyShare
 import com.example.streampitv.data.MeResponse
 import com.example.streampitv.ui.components.BrandMark
 import com.example.streampitv.ui.components.FocusableItem
+import com.example.streampitv.ui.components.ServerStatsBar
 import com.example.streampitv.ui.components.SharePanel
 import com.example.streampitv.util.catching
 import com.example.streampitv.util.formatIsoDate
@@ -130,6 +131,11 @@ fun SettingsScreen(
             Card("Server", Modifier.weight(1f)) {
                 DetailRow("Address", serverUrl)
                 DetailRow("Session", token.take(8) + "…")
+                Spacer(Modifier.height(14.dp))
+                // Moved off Home's header, where even the compact bar was wide enough to push
+                // the settings button off a 1080p screen. This is also the better home for it:
+                // the poll stops when you leave, instead of running the whole time you browse.
+                ServerStatsBar(serverUrl = serverUrl, token = token)
             }
         }
 

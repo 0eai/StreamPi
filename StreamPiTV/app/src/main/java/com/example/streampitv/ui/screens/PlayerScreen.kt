@@ -29,9 +29,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
@@ -140,6 +144,32 @@ fun PlayerScreen(
     val streamSessionId = remember { UUID.randomUUID().toString() }
 
     fun logicalPos(): Double = offsetSec + exoPlayer.currentPosition / 1000.0
+
+    /**
+     * Leaving the app with HOME stops the activity without destroying it, so onDispose never
+     * runs — playback kept going behind the launcher and the server-side stream entry stayed
+     * registered until the 30-minute staleness sweep. Reproduced on an emulator: activeStreams
+     * held at 1 indefinitely after HOME.
+     *
+     * So ON_STOP closes the player outright rather than only pausing. Pausing alone would leave
+     * the stream (and its ffmpeg process for a transcode) held for a viewer who has gone to
+     * another app; closing runs the normal teardown path. Nothing is really lost — progress is
+     * synced every 5s, so the item resumes from Continue Watching.
+     *
+     * This reverses an earlier decision not to touch ON_STOP, which assumed the only options
+     * were "pause" or "end the stream underneath a still-open player". Exiting is neither.
+     */
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) {
+                exoPlayer.pause()   // silence it immediately, before the unmount lands
+                onClose()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     DisposableEffect(Unit) {
         onDispose {
@@ -561,14 +591,32 @@ fun PlayerScreen(
                     .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.8f))))
             ) {
                 Column(
-                    modifier = Modifier.align(Alignment.BottomStart).padding(40.dp).fillMaxWidth()
+                    modifier = Modifier.align(Alignment.BottomStart).padding(28.dp).fillMaxWidth()
                 ) {
-                    Text(item.title ?: item.filename ?: "", color = Color.White, fontSize = 32.sp, fontWeight = FontWeight.Bold)
+                    // 20sp on one line, not 32sp wrapping onto two. A scene-release filename
+                    // ("… 1080p IMAX BRrip HEVC 10bit AAC 5.1 PoOlL") is long enough that the
+                    // heading alone used to claim two lines, and the whole overlay then covered
+                    // half the picture. Ellipsised rather than wrapped: the tail of one of these
+                    // names is codec trivia, and the viewer already knows what they pressed.
+                    Text(
+                        item.title ?: item.filename ?: "",
+                        color = Color.White,
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                     item.series_name?.let {
-                        Text("$it - S${item.season} E${item.episode}", color = Color.LightGray, fontSize = 18.sp)
+                        Text(
+                            "$it - S${item.season} E${item.episode}",
+                            color = Color.LightGray,
+                            fontSize = 13.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
 
-                    Spacer(modifier = Modifier.height(20.dp))
+                    Spacer(modifier = Modifier.height(12.dp))
 
                     val shown = seekTarget?.toLong() ?: position
                     val pct = if (totalSec > 0) (shown.toFloat() / totalSec.toFloat()).coerceIn(0f, 1f) else 0f
@@ -581,7 +629,8 @@ fun PlayerScreen(
                     Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
                         Text(
                             formatDuration(shown) + (if (seekTarget != null) "  ⟳" else ""),
-                            color = Color.White
+                            color = Color.White,
+                            fontSize = 13.sp
                         )
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             val status = when {
@@ -595,12 +644,16 @@ fun PlayerScreen(
                                 contentDescription = status,
                                 tint = if (playerError != null) Tokens.danger else Color.White
                             )
-                            Text(status, color = if (playerError != null) Tokens.danger else Color.White)
+                            Text(
+                                status,
+                                color = if (playerError != null) Tokens.danger else Color.White,
+                                fontSize = 13.sp
+                            )
                             if (isTranscoded) {
                                 Text("· TRANSCODING", color = Tokens.warning, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                             }
                         }
-                        Text(formatDuration(totalSec), color = Color.White)
+                        Text(formatDuration(totalSec), color = Color.White, fontSize = 13.sp)
                     }
 
                     Spacer(modifier = Modifier.height(12.dp))
@@ -700,18 +753,18 @@ private fun PlayerButton(
     if (!focusable) {
         Row(
             modifier = modifier
-                .height(44.dp)
+                .height(36.dp)
                 .background(Color.White.copy(alpha = 0.10f), RoundedCornerShape(8.dp))
                 .padding(horizontal = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Icon(icon, contentDescription = label, tint = Tokens.muted, modifier = Modifier.size(18.dp))
-            Text(label, color = Tokens.muted, fontSize = 14.sp)
+            Icon(icon, contentDescription = label, tint = Tokens.muted, modifier = Modifier.size(16.dp))
+            Text(label, color = Tokens.muted, fontSize = 13.sp)
         }
         return
     }
-    FocusableItem(onClick = onClick, modifier = modifier.height(44.dp), scaleFactor = 1.08f) { isFocused ->
+    FocusableItem(onClick = onClick, modifier = modifier.height(36.dp), scaleFactor = 1.08f) { isFocused ->
         Row(
             // fillMaxHeight, not fillMaxSize: the enclosing Box wraps its content, so
             // filling width would adopt the row's full max constraint and this single
@@ -724,8 +777,8 @@ private fun PlayerButton(
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             val fg = if (isFocused) Color.Black else Color.White
-            Icon(icon, contentDescription = label, tint = fg, modifier = Modifier.size(18.dp))
-            Text(label, color = fg, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+            Icon(icon, contentDescription = label, tint = fg, modifier = Modifier.size(16.dp))
+            Text(label, color = fg, fontSize = 13.sp, fontWeight = FontWeight.Medium)
         }
     }
 }

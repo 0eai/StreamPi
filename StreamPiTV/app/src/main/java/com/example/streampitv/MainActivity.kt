@@ -26,6 +26,7 @@ import com.example.streampitv.ui.screens.LoginScreen
 import com.example.streampitv.ui.screens.PlayerScreen
 import com.example.streampitv.ui.screens.ServerConfigScreen
 import com.example.streampitv.ui.screens.SeriesDetailScreen
+import com.example.streampitv.ui.screens.SeriesDetailState
 import com.example.streampitv.ui.screens.SettingsScreen
 import com.example.streampitv.data.sortedForDisplay
 import com.example.streampitv.data.toVideoItem
@@ -67,6 +68,10 @@ fun StreamPiApp(context: Context) {
     // composition whenever the player or series detail opens, which would otherwise
     // discard its tab, scroll position, library and focus on every return.
     val homeState = remember { HomeState() }
+    // Same rationale as homeState: the player branch below is tested before the series branch,
+    // so starting an episode unmounts SeriesDetailScreen and would otherwise discard its
+    // scroll, focus and refetched episode list.
+    val seriesState = remember { SeriesDetailState() }
 
     /**
      * The one way out of a signed-in state, shared by the Settings sign-out button and by an
@@ -203,6 +208,7 @@ fun StreamPiApp(context: Context) {
                 series = selectedSeries!!,
                 serverUrl = serverUrl!!,
                 token = token.orEmpty(),
+                state = seriesState,
                 onPlayEpisode = { activeVideo = it },
                 onBack = { selectedSeries = null }
             )

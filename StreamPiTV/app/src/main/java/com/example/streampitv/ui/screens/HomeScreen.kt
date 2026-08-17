@@ -36,7 +36,6 @@ import com.example.streampitv.ui.components.ItemActionsSheet
 import com.example.streampitv.ui.components.SharePanel
 import com.example.streampitv.ui.components.NavTab
 import com.example.streampitv.ui.components.PosterCard
-import com.example.streampitv.ui.components.ServerStatsBar
 import com.example.streampitv.util.catching
 import com.example.streampitv.util.pollWithBackoff
 import com.example.streampitv.util.isNasOffline
@@ -290,8 +289,11 @@ fun HomeScreen(
 
                     Spacer(Modifier.weight(1f))
 
-                    ServerStatsBar(serverUrl = serverUrl, token = token, compact = true)
-
+                    // The server stats bar used to sit here. Even compact it measures wide
+                    // enough that on a 1080p panel it pushed this settings button off the right
+                    // edge entirely — the only route to Settings, gone. The stats now live on
+                    // the Settings screen, where they also stop polling every 5s while someone
+                    // is just browsing.
                     FocusableItem(onClick = onOpenSettings, shape = CircleShape) {
                         Icon(
                             Icons.Default.Settings,
