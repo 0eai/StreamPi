@@ -593,30 +593,35 @@ fun PlayerScreen(
                 Column(
                     modifier = Modifier.align(Alignment.BottomStart).padding(28.dp).fillMaxWidth()
                 ) {
-                    // 20sp on one line, not 32sp wrapping onto two. A scene-release filename
-                    // ("… 1080p IMAX BRrip HEVC 10bit AAC 5.1 PoOlL") is long enough that the
-                    // heading alone used to claim two lines, and the whole overlay then covered
-                    // half the picture. Ellipsised rather than wrapped: the tail of one of these
-                    // names is codec trivia, and the viewer already knows what they pressed.
-                    Text(
-                        item.title ?: item.filename ?: "",
-                        color = Color.White,
-                        fontSize = 20.sp,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    item.series_name?.let {
+                    // Title and the episode label share one row. 20sp on a single line, not
+                    // 32sp wrapping onto two: a scene-release filename ("… 1080p IMAX BRrip HEVC
+                    // 10bit AAC 5.1 PoOlL") used to claim two lines on its own, and the overlay
+                    // then covered half the picture. The title takes the weight so it is the part
+                    // that ellipsises — the tail of one of those names is codec trivia, whereas
+                    // "S1 E2" is the bit you actually need.
+                    Row(verticalAlignment = Alignment.Bottom, modifier = Modifier.fillMaxWidth()) {
                         Text(
-                            "$it - S${item.season} E${item.episode}",
-                            color = Color.LightGray,
-                            fontSize = 13.sp,
+                            item.title ?: item.filename ?: "",
+                            color = Color.White,
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Bold,
                             maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
                         )
+                        item.series_name?.let {
+                            Spacer(Modifier.width(10.dp))
+                            Text(
+                                "$it · S${item.season} E${item.episode}",
+                                color = Color.LightGray,
+                                fontSize = 13.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
                     }
 
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(10.dp))
 
                     val shown = seekTarget?.toLong() ?: position
                     val pct = if (totalSec > 0) (shown.toFloat() / totalSec.toFloat()).coerceIn(0f, 1f) else 0f
@@ -626,45 +631,25 @@ fun PlayerScreen(
 
                     Spacer(modifier = Modifier.height(10.dp))
 
-                    Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
-                        Text(
-                            formatDuration(shown) + (if (seekTarget != null) "  ⟳" else ""),
-                            color = Color.White,
-                            fontSize = 13.sp
-                        )
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            val status = when {
-                                playerError != null -> "Playback failed — OK to retry"
-                                isBuffering -> "Buffering…"
-                                isPlaying -> "Playing"
-                                else -> "Paused"
-                            }
-                            Icon(
-                                if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                                contentDescription = status,
-                                tint = if (playerError != null) Tokens.danger else Color.White
-                            )
-                            Text(
-                                status,
-                                color = if (playerError != null) Tokens.danger else Color.White,
-                                fontSize = 13.sp
-                            )
-                            if (isTranscoded) {
-                                Text("· TRANSCODING", color = Tokens.warning, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                            }
-                        }
-                        Text(formatDuration(totalSec), color = Color.White, fontSize = 13.sp)
-                    }
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
                     val audioCount = info?.audioTracks?.size ?: 0
                     val subCount = info?.subtitleTracks?.size ?: 0
 
+                    // Controls on the left, state and timecode on the right, one row.
+                    //
+                    // Width budget matters here: with subtitle and multi-audio labels present the
+                    // buttons alone can reach ~685dp of the ~904dp available inside the 28dp
+                    // padding on a 960dp panel. So the trailing block is kept deliberately lean —
+                    // the play/pause icon is gone (the Pause button beside it already says the
+                    // same thing) and the status text is width-capped so it ellipsises rather than
+                    // shoving the timecode off the screen.
                     Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
                         PlayerButton(
                             label = "Restart",
                             icon = Icons.Default.Replay,
@@ -704,6 +689,40 @@ fun PlayerScreen(
                                 onClick = { cycleAudio() }
                             )
                         }
+                        }
+
+                        Spacer(Modifier.weight(1f).widthIn(min = 12.dp))
+
+                        if (isTranscoded) {
+                            Text(
+                                "TRANSCODING",
+                                color = Tokens.warning,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(Modifier.width(10.dp))
+                        }
+                        Text(
+                            when {
+                                playerError != null -> "Failed"
+                                isBuffering -> "Buffering…"
+                                isPlaying -> "Playing"
+                                else -> "Paused"
+                            },
+                            color = if (playerError != null) Tokens.danger else Color.White,
+                            fontSize = 13.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.widthIn(max = 110.dp)
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        Text(
+                            formatDuration(shown) + (if (seekTarget != null) " ⟳" else "") +
+                                "  /  " + formatDuration(totalSec),
+                            color = Color.White,
+                            fontSize = 13.sp,
+                            maxLines = 1
+                        )
                     }
 
                     Spacer(modifier = Modifier.height(8.dp))
