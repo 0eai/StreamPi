@@ -97,3 +97,21 @@
   .duration-300 { animation-duration: 300ms; }
   .duration-500 { animation-duration: 500ms; }
 }
+
+/* Poster.jsx/EpisodeCard.jsx reveal their action buttons, metadata badges, and title bar via
+   group-hover: — fine on desktop, but a touch device has no persistent :hover state at all
+   (mobile Safari/Chrome simulate a brief one on tap, requiring a second tap to actually click
+   through), so this content was effectively unreachable there. `(hover: none)` reliably
+   matches touch-only devices without affecting real pointer devices, so this only ever forces
+   the already-hovered *look* to be the resting state where hovering isn't possible in the
+   first place — desktop's actual hover behavior is untouched. Targets the bare group-hover:*
+   marker classes directly (not Tailwind's own :hover-gated compound selector), so !important is
+   what makes each one apply unconditionally instead of only-on-hover. */
+@media (hover: none) {
+  .group-hover\:opacity-100 { opacity: 1 !important; }
+  .group-hover\:opacity-40 { opacity: 0.4 !important; }
+  .group-hover\:scale-110 { transform: scale(1.1) !important; }
+  .group-hover\:translate-y-0 { transform: translateY(0) !important; }
+  .group-hover\:-translate-y-8 { transform: translateY(-2rem) !important; }
+  .group-hover\:bg-transparent { background-color: transparent !important; }
+}

@@ -27,42 +27,51 @@ const TopNav = ({ username, role, activeTab, setActiveTab, setSelectedSeries, to
 
     const goToTab = (id) => { setActiveTab(id); setSelectedSeries(null); setIsUserMenuOpen(false); };
 
+    // pt-[max(...)] below, rather than the plain py-3 this replaced: index.html declares
+    // viewport-fit=cover + apple-mobile-web-app-status-bar-style=black-translucent, which is
+    // exactly what makes an installed iOS PWA draw edge-to-edge under the status bar instead
+    // of iOS reserving space for it automatically — env(safe-area-inset-top) is the
+    // compensating inset for that, and max() keeps the normal 0.75rem padding on every device
+    // that reports 0 (i.e. not an installed iOS PWA at all).
     return (
-        <nav className="fixed top-0 w-full z-40 bg-gradient-to-b from-bg/90 to-transparent px-4 md:px-6 py-3 flex justify-between items-center backdrop-blur-[2px]">
-                <div className="flex items-center gap-4 md:gap-8 overflow-hidden">
-                    <div
-                        className="flex items-center cursor-pointer"
-                        onClick={() => { setSelectedSeries(null); setActiveTab('home'); }}
-                        title="StreamPi"
-                    >
-                        <img src="/logo.png" alt="StreamPi" className="h-9 w-auto object-contain" />
-                        {/* Sized a bit under the logo's h-9 (36px) rather than matching it
-                            exactly — full height read as too heavy next to the mark.
-                            Gradient matches the logo mark's own blue → purple → pink diagonal. */}
-                        <span className="ml-2 text-[26px] leading-none font-bold bg-gradient-to-r from-blue-600 via-purple-600 to-pink-600 bg-clip-text text-transparent hidden sm:inline">
-                            StreamPi
-                        </span>
-                    </div>
-                    {/* One active-state treatment for all tabs (accent bg + accent text),
-                        replacing the previous per-tab colors (white/blue-400/red-500 — the last
-                        of which didn't even match the red-600 brand accent used everywhere else). */}
-                    <div className="flex items-center gap-1 md:gap-2 text-sm font-medium text-muted">
-                        {TABS.map(({ id, label, Icon }) => (
-                            <button
-                                key={id}
-                                onClick={() => { setActiveTab(id); setSelectedSeries(null); }}
-                                className={`flex items-center gap-2 px-3 py-2 rounded-md transition-colors ${activeTab === id ? 'bg-accent-soft text-accent' : 'hover:bg-surface-2 hover:text-text'}`}
-                                title={label}
-                            >
-                                <Icon className="w-5 h-5" />
-                                <span className="hidden md:inline">{label}</span>
-                            </button>
-                        ))}
-                    </div>
+        <nav className="fixed top-0 w-full z-40 bg-gradient-to-b from-bg/90 to-transparent px-4 md:px-6 pb-3 pt-[max(0.75rem,env(safe-area-inset-top))] grid grid-cols-[1fr_auto_1fr] items-center gap-4 backdrop-blur-[2px]">
+                {/* One active-state treatment for all tabs (accent bg + accent text),
+                    replacing the previous per-tab colors (white/blue-400/red-500 — the last
+                    of which didn't even match the red-600 brand accent used everywhere else). */}
+                <div className="flex items-center gap-1 md:gap-2 text-sm font-medium text-muted overflow-hidden">
+                    {TABS.map(({ id, label, Icon }) => (
+                        <button
+                            key={id}
+                            onClick={() => { setActiveTab(id); setSelectedSeries(null); }}
+                            className={`flex items-center gap-2 px-3 py-2 rounded-md transition-colors ${activeTab === id ? 'bg-accent-soft text-accent' : 'hover:bg-surface-2 hover:text-text'}`}
+                            title={label}
+                        >
+                            <Icon className="w-5 h-5" />
+                            <span className="hidden md:inline">{label}</span>
+                        </button>
+                    ))}
+                </div>
+
+                {/* Center column is sized to its content (grid-cols-[1fr_auto_1fr]), with the
+                    two flanking 1fr columns splitting whatever space is left equally — that's
+                    what keeps this centered on the *whole* bar regardless of how wide the tabs
+                    or the right-side actions are, rather than just centered in leftover space. */}
+                <div
+                    className="flex items-center justify-center cursor-pointer whitespace-nowrap"
+                    onClick={() => { setSelectedSeries(null); setActiveTab('home'); }}
+                    title="StreamPi"
+                >
+                    <img src="/logo.png" alt="StreamPi" className="h-9 w-auto object-contain" />
+                    {/* Sized a bit under the logo's h-9 (36px) rather than matching it
+                        exactly — full height read as too heavy next to the mark.
+                        Gradient matches the logo mark's own blue → purple → pink diagonal. */}
+                    <span className="ml-2 text-[26px] leading-none font-bold bg-gradient-to-r from-blue-600 via-purple-600 to-pink-600 bg-clip-text text-transparent hidden sm:inline">
+                        StreamPi
+                    </span>
                 </div>
 
                 {/* Right Side Actions */}
-                <div className="flex items-center gap-2 md:gap-4">
+                <div className="flex items-center justify-end gap-2 md:gap-4">
 
                     <ServerStats token={token} serverUrl={serverUrl} />
 

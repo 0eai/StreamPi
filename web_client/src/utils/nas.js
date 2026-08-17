@@ -70,7 +70,13 @@ export const useNasTransferProgress = (serverUrl, token, activeFilenames) => {
     const hasActive = activeFilenames.length > 0;
 
     usePolling(async () => {
-        if (!token || !hasActive) { setJobsByFilename({}); return; }
+        // usePolling's own tick runs on every interval regardless of hasActive (it has to, so it
+        // notices activeFilenames going from empty to non-empty) — an unconditional setState
+        // here would otherwise re-render every consumer of this hook (all the way up to
+        // StreamApp) every TRANSFER_POLL_MS forever, even completely at rest. The updater form
+        // bails out with the same reference when there's nothing to clear, so React skips the
+        // re-render entirely instead of just shortening it.
+        if (!token || !hasActive) { setJobsByFilename(prev => Object.keys(prev).length === 0 ? prev : {}); return; }
         const res = await apiFetch(serverUrl, '/api/nas/jobs', token);
         if (!res.ok) throw new Error(`nas jobs failed: ${res.status}`);
         const data = await res.json();

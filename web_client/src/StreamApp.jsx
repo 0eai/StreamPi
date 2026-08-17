@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
-import { Play, Unlock, Lock, Trash2, Film, Tv, Clock, Archive, RefreshCcw, Pencil, WifiOff, Loader2 } from 'lucide-react';
-import { formatDuration } from './utils/format';
+import { Film, Tv, Clock, Pencil, WifiOff } from 'lucide-react';
 import { SERVER_URL, apiFetch } from './utils/api';
-import { isNasOffline, nasOfflineMessage, useNasAvailability } from './utils/nas';
+import { useNasAvailability } from './utils/nas';
+import { usePolling } from './utils/usePolling';
 import { useLibraryActions } from './utils/useLibraryActions';
 import { useUploads } from './utils/useUploads';
 import LoginScreen from './components/LoginScreen';
@@ -11,9 +11,12 @@ import Discovery from './components/Discovery';
 import DashboardTab from './components/DashboardTab';
 import SettingsTab from './components/SettingsTab';
 import Poster from './components/Poster';
+import EpisodeCard from './components/EpisodeCard';
 import UploadQueue from './components/UploadQueue';
 import UploadWizard from './components/UploadWizard';
 import CustomVideoPlayer from './components/CustomVideoPlayer';
+import ShareModal from './components/ShareModal';
+import CastModal from './components/CastModal';
 import ErrorBoundary from './components/ErrorBoundary';
 
 export default function StreamApp() {
@@ -23,6 +26,7 @@ export default function StreamApp() {
     const [activeVideo, setActiveVideo] = useState(null);
     const [activeTab, setActiveTab] = useState('home');
     const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
+    const [castItem, setCastItem] = useState(null);
 
     const handleLogin = (newToken, newUsername, newRole) => {
         setToken(newToken);
@@ -57,9 +61,22 @@ export default function StreamApp() {
     // Polled separately from the library: node reachability changes while the page is
     // open, and the library is fetched once per load.
     const availableNodeIds = useNasAvailability(SERVER_URL, token);
-    const { library, loadError, selectedSeries, setSelectedSeries, fetchData, moveStatus, handleDelete, handleDeleteSeries, handleRenameMovie, handleRenameSeries, handleMove, handleTogglePrivacy } = libraryActions;
+    const { library, loadError, selectedSeries, setSelectedSeries, fetchData, moveStatus, shareLink, setShareLink, handleDelete, handleDeleteSeries, handleRenameMovie, handleRenameSeries, handleMove, handleTogglePrivacy, handleShare } = libraryActions;
 
     const uploads = useUploads(token, SERVER_URL, fetchData);
+
+    // The receiver half of "Play On…" (CastModal/Poster/EpisodeCard's Cast button) — mirrors
+    // StreamPiTV's own idle-screen poll of the same endpoint. Skips the request entirely while
+    // something is already playing, same as the TV app: its poll loop lives in HomeScreen and
+    // stops the moment PlayerScreen replaces it, so a device already watching something won't
+    // have a second command silently swap it out mid-playback.
+    usePolling(async () => {
+        if (!token || activeVideo) return;
+        const res = await apiFetch(SERVER_URL, '/api/remote/pending', token);
+        if (!res.ok) throw new Error(`remote pending check failed: ${res.status}`);
+        const data = await res.json();
+        if (data.command) setActiveVideo({ path: data.command.path, progress: data.command.startTime || 0 });
+    }, 5000, [token, activeVideo]);
 
     if (!token) return <LoginScreen onLogin={handleLogin} />;
 
@@ -90,6 +107,8 @@ export default function StreamApp() {
             />
             <UploadWizard isOpen={isUploadModalOpen} onClose={() => setIsUploadModalOpen(false)} onStartUpload={uploads.handleStartUpload} token={token} serverUrl={SERVER_URL} />
             <UploadQueue queue={uploads.uploads} onRemove={uploads.removeUpload} onRetry={uploads.retryUpload} onClearCompleted={uploads.clearCompletedUploads} />
+            <ShareModal shareLink={shareLink} onClose={() => setShareLink(null)} />
+            <CastModal item={castItem} onClose={() => setCastItem(null)} serverUrl={SERVER_URL} token={token} />
 
             <div className="pt-24 pb-12 px-6 md:px-12 space-y-10 max-w-[1600px] mx-auto">
             {/* A failed load used to be indistinguishable from a genuinely empty library — the
@@ -120,65 +139,20 @@ export default function StreamApp() {
                         </div>
                         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
                             {selectedSeries.episodes.map(ep => (
-                                <div key={ep.path} className="group relative bg-gray-900 rounded-xl overflow-hidden hover:bg-gray-800 transition-colors border border-gray-800/50 hover:border-gray-700">
-                                    <div onClick={() => {
-                                        // Restore reads from the same node a stream would, so
-                                        // an offline node rules out both.
-                                        if (isNasOffline(ep, availableNodeIds)) alert(nasOfflineMessage(ep));
-                                        else if (ep.is_archived) handleMove(ep);
-                                        else setActiveVideo(ep);
-                                    }} className="aspect-video bg-gray-800 flex items-center justify-center cursor-pointer relative overflow-hidden">
-                                        {ep.poster && <img src={`${SERVER_URL}/api/posters/${ep.poster}`} className="absolute inset-0 w-full h-full object-cover opacity-60 group-hover:opacity-40 transition-opacity" loading="lazy" />}
-                                        <div className="absolute inset-0 bg-black/40 group-hover:bg-transparent transition-colors" />
-                                        <Play className="w-10 h-10 text-white opacity-70 group-hover:opacity-100 group-hover:scale-110 transition-all z-10" />
-                                        {ep.progress > 0 && <div className="absolute bottom-0 left-0 h-1 bg-red-600 w-full" style={{ width: `${(ep.progress/ep.duration)*100}%` }} />}
-                                        <span className="absolute bottom-2 right-2 text-xs bg-black/70 text-white px-1 rounded">{formatDuration(ep.duration)}</span>
-                                        {/* Archived Badge for Episodes — amber + WifiOff once
-                                            the node holding it is down, matching Poster.jsx */}
-                                        {ep.is_archived === 1 && (
-                                            isNasOffline(ep, availableNodeIds) ? (
-                                                <span title="Unavailable — storage node offline" className="absolute top-2 left-2 bg-amber-600/90 text-white text-[10px] font-bold px-1.5 py-0.5 rounded flex items-center gap-1"><WifiOff className="w-3 h-3"/></span>
-                                            ) : (
-                                                <span className="absolute top-2 left-2 bg-blue-600/90 text-white text-[10px] font-bold px-1.5 py-0.5 rounded flex items-center gap-1"><Archive className="w-3 h-3"/></span>
-                                            )
-                                        )}
-                                    </div>
-                                    {/* Same move-in-progress overlay as Poster.jsx, covering the whole
-                                        card (both the thumbnail and the action buttons below it) so a
-                                        second click can't fire a concurrent nas-action for this episode. */}
-                                    {moveStatus[ep.filename] !== undefined && (
-                                        <div className="absolute inset-0 z-30 bg-black/75 flex flex-col items-center justify-center gap-2 text-white">
-                                            <Loader2 className="w-6 h-6 animate-spin" />
-                                            <span className="text-xs font-bold">
-                                                {ep.is_archived ? 'Restoring' : 'Archiving'}… {moveStatus[ep.filename]}%
-                                            </span>
-                                            <div className="w-2/3 h-1.5 bg-white/20 rounded-full overflow-hidden">
-                                                <div className="h-full bg-white transition-all duration-500" style={{ width: `${moveStatus[ep.filename]}%` }} />
-                                            </div>
-                                        </div>
-                                    )}
-                                    <div className="p-4 flex justify-between items-start">
-                                        <div onClick={() => isNasOffline(ep, availableNodeIds) ? alert(nasOfflineMessage(ep)) : setActiveVideo(ep)} className="cursor-pointer">
-                                            <h4 className="font-bold text-white mb-1">Episode {ep.episode}</h4>
-                                            <p className="text-sm text-gray-400 font-mono">Season {ep.season}</p>
-                                        </div>
-                                        <div className="flex gap-2">
-                                            {!ep.is_archived && (
-                                                <button
-                                                    onClick={() => handleTogglePrivacy(ep)}
-                                                    className={`p-1 rounded hover:bg-white/10 transition-colors ${ep.is_private ? 'text-red-500 hover:text-red-400' : 'text-gray-500 hover:text-gray-300'}`}
-                                                    title={ep.is_private ? "Unlock" : "Lock"}
-                                                >
-                                                    {ep.is_private ? <Unlock className="w-4 h-4"/> : <Lock className="w-4 h-4"/>}
-                                                </button>
-                                            )}
-                                            <button onClick={() => handleMove(ep)} className={`p-1 rounded hover:bg-white/10 transition-colors ${ep.is_archived ? 'text-blue-400 hover:text-blue-300' : 'text-yellow-600 hover:text-yellow-500'}`} title={ep.is_archived ? "Restore" : "Archive"}>
-                                                {ep.is_archived ? <RefreshCcw className="w-4 h-4"/> : <Archive className="w-4 h-4"/>}
-                                            </button>
-                                            <button onClick={() => handleDelete(ep)} className="text-gray-600 hover:text-red-500 p-1 rounded hover:bg-white/5 transition-colors"><Trash2 className="w-4 h-4" /></button>
-                                        </div>
-                                    </div>
-                                </div>
+                                <EpisodeCard
+                                    key={ep.path}
+                                    ep={ep}
+                                    availableNodeIds={availableNodeIds}
+                                    movePercent={moveStatus[ep.filename]}
+                                    serverUrl={SERVER_URL}
+                                    token={token}
+                                    onPlay={setActiveVideo}
+                                    onMove={handleMove}
+                                    onTogglePrivacy={handleTogglePrivacy}
+                                    onShare={handleShare}
+                                    onCast={setCastItem}
+                                    onDelete={handleDelete}
+                                />
                             ))}
                         </div>
                     </div>
@@ -191,7 +165,7 @@ export default function StreamApp() {
                                         <h3 className="text-xl font-bold text-white mb-4 flex items-center gap-2"><Clock className="w-5 h-5 text-red-600" /> Continue Watching</h3>
                                         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6">
                                             {library.continueWatching.map(item => (
-                                                <Poster key={item.path} item={item} progress={(item.progress / item.duration) * 100} movePercent={moveStatus[item.filename]} onClick={setActiveVideo} serverUrl={SERVER_URL} token={token} onMove={handleMove} availableNodeIds={availableNodeIds} />
+                                                <Poster key={item.path} item={item} progress={(item.progress / item.duration) * 100} movePercent={moveStatus[item.filename]} onClick={setActiveVideo} serverUrl={SERVER_URL} token={token} onMove={handleMove} onShare={handleShare} onCast={setCastItem} availableNodeIds={availableNodeIds} />
                                             ))}
                                         </div>
                                     </section>
@@ -200,7 +174,7 @@ export default function StreamApp() {
                                     <h3 className="text-xl font-bold text-white mb-4 flex items-center gap-2"><Film className="w-5 h-5 text-blue-500" /> Recent Movies</h3>
                                     {library.movies.length === 0 ? <div className="text-gray-500 italic text-sm">No movies found. Upload one!</div> :
                                         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6">
-                                            {library.movies.map(movie => <Poster key={movie.path} item={movie} progress={0} movePercent={moveStatus[movie.filename]} onClick={setActiveVideo} onDelete={handleDelete} onEdit={handleRenameMovie} onMove={handleMove} onTogglePrivacy={handleTogglePrivacy} serverUrl={SERVER_URL} token={token} availableNodeIds={availableNodeIds} />)}
+                                            {library.movies.map(movie => <Poster key={movie.path} item={movie} progress={0} movePercent={moveStatus[movie.filename]} onClick={setActiveVideo} onDelete={handleDelete} onEdit={handleRenameMovie} onMove={handleMove} onShare={handleShare} onCast={setCastItem} onTogglePrivacy={handleTogglePrivacy} serverUrl={SERVER_URL} token={token} availableNodeIds={availableNodeIds} />)}
                                         </div>
                                     }
                                 </section>
@@ -208,7 +182,7 @@ export default function StreamApp() {
                                     <h3 className="text-xl font-bold text-white mb-4 flex items-center gap-2"><Tv className="w-5 h-5 text-green-500" /> Recent Series</h3>
                                     {library.series.length === 0 ? <div className="text-gray-500 italic text-sm">No series found.</div> :
                                         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6">
-                                            {library.series.map(s => <Poster key={s.title} item={{ title: s.title, series_name: s.title, episodes: s.episodes, poster: s.episodes[0]?.poster }} progress={0} onClick={() => setSelectedSeries(s)} onDelete={handleDeleteSeries} onEdit={handleRenameSeries} serverUrl={SERVER_URL} token={token} availableNodeIds={availableNodeIds} />)}
+                                            {library.series.map(s => <Poster key={s.title} item={{ title: s.title, series_name: s.title, episodes: s.episodes, poster: s.episodes[0]?.poster }} progress={0} onClick={() => setSelectedSeries(s)} onDelete={handleDeleteSeries} onEdit={handleRenameSeries} onShare={handleShare} serverUrl={SERVER_URL} token={token} availableNodeIds={availableNodeIds} />)}
                                         </div>
                                     }
                                 </section>
@@ -218,7 +192,7 @@ export default function StreamApp() {
                             <section>
                                 <h3 className="text-xl font-bold text-white mb-4 flex items-center gap-2"><Film className="w-5 h-5 text-blue-500" /> All Movies</h3>
                                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6">
-                                    {library.movies.map(movie => <Poster key={movie.path} item={movie} progress={0} movePercent={moveStatus[movie.filename]} onClick={setActiveVideo} onDelete={handleDelete} onEdit={handleRenameMovie} onMove={handleMove} onTogglePrivacy={handleTogglePrivacy} serverUrl={SERVER_URL} token={token} availableNodeIds={availableNodeIds} />)}
+                                    {library.movies.map(movie => <Poster key={movie.path} item={movie} progress={0} movePercent={moveStatus[movie.filename]} onClick={setActiveVideo} onDelete={handleDelete} onEdit={handleRenameMovie} onMove={handleMove} onShare={handleShare} onCast={setCastItem} onTogglePrivacy={handleTogglePrivacy} serverUrl={SERVER_URL} token={token} availableNodeIds={availableNodeIds} />)}
                                 </div>
                             </section>
                         )}
@@ -226,7 +200,7 @@ export default function StreamApp() {
                             <section>
                                 <h3 className="text-xl font-bold text-white mb-4 flex items-center gap-2"><Tv className="w-5 h-5 text-green-500" /> All Series</h3>
                                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6">
-                                    {library.series.map(s => <Poster key={s.title} item={{ title: s.title, series_name: s.title, episodes: s.episodes, poster: s.episodes[0]?.poster }} progress={0} onClick={() => setSelectedSeries(s)} onDelete={handleDeleteSeries} onEdit={handleRenameSeries} serverUrl={SERVER_URL} token={token} availableNodeIds={availableNodeIds} />)}
+                                    {library.series.map(s => <Poster key={s.title} item={{ title: s.title, series_name: s.title, episodes: s.episodes, poster: s.episodes[0]?.poster }} progress={0} onClick={() => setSelectedSeries(s)} onDelete={handleDeleteSeries} onEdit={handleRenameSeries} onShare={handleShare} serverUrl={SERVER_URL} token={token} availableNodeIds={availableNodeIds} />)}
                                 </div>
                             </section>
                         )}

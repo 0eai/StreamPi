@@ -1,15 +1,17 @@
 import React, { useState, useRef } from 'react';
-import { Download, Play, Database, Lock, Unlock, X, Trash2, Loader2, Volume2, Clock3, CheckCircle2, HardDrive, Archive, RefreshCcw, Server, Subtitles, Pencil, WifiOff } from 'lucide-react';
+import { Download, Play, Database, Lock, Unlock, X, Trash2, Loader2, Volume2, Clock3, CheckCircle2, HardDrive, Archive, RefreshCcw, Server, Subtitles, Pencil, WifiOff, Share2, Info, Cast } from 'lucide-react';
 import { formatDuration } from '../utils/format';
 import { apiFetch } from '../utils/api';
 import { isNasOffline, nasOfflineMessage } from '../utils/nas';
+import MediaInfoModal from './MediaInfoModal';
 
-const Poster = ({ item, onClick, onDelete, onEdit, onMove, onTogglePrivacy, progress, movePercent, serverUrl, token, availableNodeIds }) => {
+const Poster = ({ item, onClick, onDelete, onEdit, onMove, onShare, onCast, onTogglePrivacy, progress, movePercent, serverUrl, token, availableNodeIds }) => {
 
     const nasOffline = isNasOffline(item, availableNodeIds);
-    
+
     const [metadata, setMetadata] = useState(null);
     const [isLoadingMeta, setIsLoadingMeta] = useState(false);
+    const [showInfoModal, setShowInfoModal] = useState(false);
     const fetchAttempted = useRef(false); // Prevent double firing
 
     const formatFileSize = (bytes) => {
@@ -22,20 +24,41 @@ const Poster = ({ item, onClick, onDelete, onEdit, onMove, onTogglePrivacy, prog
 
     const handleMouseEnter = async () => {
         if (metadata || fetchAttempted.current) return; // Don't fetch if we have data or already tried
-        
+
+        // A series card (StreamApp builds { title, series_name, episodes, poster } for those)
+        // has no `.path` of its own — probing "undefined" 404'd silently every time, which is
+        // why these badges never appeared for series at all. The first episode is a reasonable
+        // stand-in for audio/subtitle languages (probing every episode just to build a hover
+        // badge is a lot of ffprobe calls for little benefit); file size below is corrected
+        // to the whole series' total rather than leaving it as just that one episode's size.
+        const probePath = item.path || item.episodes?.[0]?.path;
+        if (!probePath) return;
+
         fetchAttempted.current = true;
         setIsLoadingMeta(true);
 
         try {
-            const res = await apiFetch(serverUrl, `/api/media/info?path=${encodeURIComponent(item.path)}`, token);
+            const res = await apiFetch(serverUrl, `/api/media/info?path=${encodeURIComponent(probePath)}`, token);
             if (res.ok) {
                 const data = await res.json();
+                if (!item.path && item.episodes) {
+                    data.fileSize = item.episodes.reduce((sum, ep) => sum + (ep.size || 0), 0);
+                }
                 setMetadata(data);
             }
         } catch (e) {
             console.error("Meta fetch failed", e);
         }
         setIsLoadingMeta(false);
+    };
+
+    // The info button can be the very first interaction on a device with no real :hover (a
+    // touch device never fires handleMouseEnter at all) — calling it here too guarantees the
+    // fetch has actually started, guarded by the same fetchAttempted ref either way.
+    const handleShowInfo = (e) => {
+        e.stopPropagation();
+        handleMouseEnter();
+        setShowInfoModal(true);
     };
 
     const handleDownload = async (e) => {
@@ -160,6 +183,8 @@ const Poster = ({ item, onClick, onDelete, onEdit, onMove, onTogglePrivacy, prog
                     <div className="flex justify-between items-end mt-1">
                         {item.season ? (
                             <p className="text-gray-300 text-xs">S{item.season} E{item.episode}</p>
+                        ) : item.episodes ? (
+                            <p className="text-gray-400 text-[10px] uppercase">{item.episodes.length} Episode{item.episodes.length !== 1 ? 's' : ''}</p>
                         ) : (
                             <p className="text-gray-400 text-[10px] uppercase">Movie</p>
                         )}
@@ -242,7 +267,16 @@ const Poster = ({ item, onClick, onDelete, onEdit, onMove, onTogglePrivacy, prog
                         {item.is_private ? <Unlock className="w-4 h-4" /> : <Lock className="w-4 h-4" />}
                     </button>
                 )}
-                <button 
+                <button
+                    onClick={handleShowInfo}
+                    className="p-1.5 bg-black/60 rounded-full text-gray-400 hover:text-blue-500 hover:bg-white transition-all"
+                    title="Media Info"
+                    aria-label="Media Info"
+                >
+                    <Info className="w-4 h-4" />
+                </button>
+
+                <button
                     onClick={handleDownload}
                     className="p-1.5 bg-black/60 rounded-full text-gray-400 hover:text-green-500 hover:bg-white transition-all"
                     title="Download"
@@ -259,6 +293,31 @@ const Poster = ({ item, onClick, onDelete, onEdit, onMove, onTogglePrivacy, prog
                         aria-label={item.is_archived ? "Restore from NAS" : "Move to NAS Storage"}
                     >
                         {item.is_archived ? <RefreshCcw className="w-4 h-4" /> : <HardDrive className="w-4 h-4" />}
+                    </button>
+                )}
+
+                {onShare && !item.is_private && (
+                    <button
+                        onClick={(e) => { e.stopPropagation(); onShare(item); }}
+                        className="p-1.5 bg-black/60 rounded-full text-gray-400 hover:text-purple-400 hover:bg-white transition-all"
+                        title="Share"
+                        aria-label="Share"
+                    >
+                        <Share2 className="w-4 h-4" />
+                    </button>
+                )}
+
+                {/* item.path is required — a series-summary card has none of its own
+                    (StreamApp builds { title, series_name, episodes, poster } for those), and
+                    there's no single file to name in a "play this" command for a whole series. */}
+                {onCast && item.path && (
+                    <button
+                        onClick={(e) => { e.stopPropagation(); onCast(item); }}
+                        className="p-1.5 bg-black/60 rounded-full text-gray-400 hover:text-blue-400 hover:bg-white transition-all"
+                        title="Play on another device"
+                        aria-label="Play on another device"
+                    >
+                        <Cast className="w-4 h-4" />
                     </button>
                 )}
 
@@ -284,6 +343,8 @@ const Poster = ({ item, onClick, onDelete, onEdit, onMove, onTogglePrivacy, prog
                     </button>
                 )}
             </div>
+
+            <MediaInfoModal isOpen={showInfoModal} onClose={() => setShowInfoModal(false)} item={item} metadata={metadata} loading={isLoadingMeta} />
         </div>
     );
 };

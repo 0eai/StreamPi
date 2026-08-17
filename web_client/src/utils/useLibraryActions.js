@@ -28,6 +28,7 @@ export const useLibraryActions = (token, serverUrl, onUnauthorized) => {
     const [loadError, setLoadError] = useState(false);
     const [loading, setLoading] = useState(false);
     const [selectedSeries, setSelectedSeries] = useState(null);
+    const [shareLink, setShareLink] = useState(null); // { url, label } | null — feeds ShareModal
     const [movingFilenames, setMovingFilenames] = useState(loadMovingFilenames);
     // When we started (or resumed) watching each filename — render-time, not an effect, since
     // it just needs to seed any name that doesn't have one yet, including ones resumed from
@@ -235,6 +236,24 @@ export const useLibraryActions = (token, serverUrl, onUnauthorized) => {
         }
     };
 
+    // --- SHARE LOGIC ---
+    // A series-summary card (StreamApp builds { title, series_name, episodes, poster } for
+    // those, with no `path` of its own) shares as a whole series; anything with a `path`
+    // (a movie, a continue-watching item, or a per-episode row) shares as that one file.
+    const handleShare = async (item) => {
+        const isSeries = !item.path;
+        const body = isSeries
+            ? { shareType: 'series', seriesName: item.series_name || item.title }
+            : { shareType: 'file', path: item.path };
+
+        try {
+            const res = await apiFetch(serverUrl, '/api/share', token, { method: 'POST', json: body });
+            const data = await parseJsonSafe(res);
+            if (!res.ok) { alert(`Share failed: ${data.error || res.statusText}`); return; }
+            setShareLink({ url: `${window.location.origin}/share/${data.token}`, label: item.title || item.series_name });
+        } catch (e) { alert("Share failed: " + e.message); }
+    };
+
     const handleTogglePrivacy = async (item) => {
         const actionText = item.is_private ? "Unlock (Make Public)" : "Lock (Move to Private Vault)";
         if (!confirm(`${actionText} for "${item.title || item.filename}"? This will physically move the file.`)) return;
@@ -273,7 +292,7 @@ export const useLibraryActions = (token, serverUrl, onUnauthorized) => {
 
     return {
         library, loadError, loading, selectedSeries, setSelectedSeries,
-        fetchData, resetLibrary, moveStatus,
-        handleDelete, handleDeleteSeries, handleRenameMovie, handleRenameSeries, handleMove, handleTogglePrivacy
+        fetchData, resetLibrary, moveStatus, shareLink, setShareLink,
+        handleDelete, handleDeleteSeries, handleRenameMovie, handleRenameSeries, handleMove, handleTogglePrivacy, handleShare
     };
 };

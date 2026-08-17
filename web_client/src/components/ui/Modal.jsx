@@ -1,4 +1,5 @@
 import React, { useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 
 const FOCUSABLE_SELECTOR = 'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -12,6 +13,15 @@ const FOCUSABLE_SELECTOR = 'a[href], button:not([disabled]), textarea:not([disab
 const Modal = ({ isOpen, onClose, title, maxWidth = 'max-w-sm', nested = false, panelClassName = '', hideCloseButton = false, children }) => {
     const panelRef = useRef(null);
     const previouslyFocusedRef = useRef(null);
+    // Callers overwhelmingly pass an inline `() => setX(false)` for onClose, which gets a new
+    // identity on every render of whatever owns that state — StreamApp re-renders on every poll
+    // tick from any hook it uses, open modal or not. A ref means the effect below only depends
+    // on `isOpen`, so a parent re-render can no longer retrigger this effect's cleanup — which
+    // previously ran its "restore focus to what was focused before the modal opened" step any
+    // time onClose's identity changed, yanking focus out of whatever input the user was
+    // actively typing into even though the modal wasn't actually closing.
+    const onCloseRef = useRef(onClose);
+    onCloseRef.current = onClose;
 
     useEffect(() => {
         if (!isOpen) return;
@@ -23,7 +33,7 @@ const Modal = ({ isOpen, onClose, title, maxWidth = 'max-w-sm', nested = false, 
 
         const handleKeyDown = (e) => {
             if (e.key === 'Escape') {
-                onClose?.();
+                onCloseRef.current?.();
                 return;
             }
             if (e.key !== 'Tab' || !panel) return;
@@ -49,11 +59,18 @@ const Modal = ({ isOpen, onClose, title, maxWidth = 'max-w-sm', nested = false, 
             // programmatic focus change elsewhere shouldn't be yanked back on close).
             if (panel?.contains(document.activeElement)) previouslyFocusedRef.current?.focus?.();
         };
-    }, [isOpen, onClose]);
+    }, [isOpen]);
 
     if (!isOpen) return null;
 
-    return (
+    // Portaled to document.body rather than rendered in place — `position: fixed` is relative
+    // to the nearest *transformed* ancestor, not necessarily the viewport (CSS spec: any
+    // ancestor with a transform/filter/will-change becomes the containing block for a fixed
+    // descendant). Poster.jsx's card has `hover:scale-105`, so a modal opened from inside it
+    // while still hovered got boxed into that card's own bounds instead of covering the
+    // screen. Portaling out from under any such ancestor is the general fix, not just a
+    // one-off for that specific card.
+    return createPortal(
         <div className={`fixed inset-0 bg-black/80 ${nested ? 'z-[70]' : 'z-[60]'} flex items-center justify-center p-4 backdrop-blur-sm animate-in fade-in duration-200`}>
             <div
                 ref={panelRef}
@@ -71,7 +88,8 @@ const Modal = ({ isOpen, onClose, title, maxWidth = 'max-w-sm', nested = false, 
                 {title && <h2 className="text-lg font-semibold text-text mb-6 flex items-center gap-2">{title}</h2>}
                 {children}
             </div>
-        </div>
+        </div>,
+        document.body
     );
 };
 

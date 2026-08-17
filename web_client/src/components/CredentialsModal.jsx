@@ -1,31 +1,7 @@
 import React, { useState } from 'react';
 import { Server, Copy, Check } from 'lucide-react';
 import Modal from './ui/Modal';
-
-const copyToClipboard = (text) => {
-    if (navigator.clipboard && window.isSecureContext) {
-        return navigator.clipboard.writeText(text);
-    }
-    // navigator.clipboard is only available in secure contexts (HTTPS or localhost) —
-    // fall back to the legacy execCommand approach so Copy still works over plain HTTP.
-    return new Promise((resolve, reject) => {
-        const textarea = document.createElement('textarea');
-        textarea.value = text;
-        textarea.style.position = 'fixed';
-        textarea.style.opacity = '0';
-        document.body.appendChild(textarea);
-        textarea.focus();
-        textarea.select();
-        try {
-            document.execCommand('copy');
-            resolve();
-        } catch (e) {
-            reject(e);
-        } finally {
-            document.body.removeChild(textarea);
-        }
-    });
-};
+import { copyToClipboard } from '../utils/clipboard';
 
 const CredentialsModal = ({ credentials, onClose }) => {
     const [copied, setCopied] = useState(null);

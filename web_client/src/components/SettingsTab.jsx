@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { User, Lock, KeyRound, Server, Plus, ExternalLink } from 'lucide-react';
+import { User, Lock, KeyRound, Server, Plus, ExternalLink, Share2, Film, Tv, Trash2, Copy, Check } from 'lucide-react';
 import ActivityLog from './ActivityLog';
 import AddNodeModal from './AddNodeModal';
 import CredentialsModal from './CredentialsModal';
@@ -10,6 +10,7 @@ import LinkKunjiModal from './LinkKunjiModal';
 import { formatBytes } from '../utils/format';
 import { usePolling } from '../utils/usePolling';
 import { apiFetch, parseJsonSafe } from '../utils/api';
+import { copyToClipboard } from '../utils/clipboard';
 
 const isAdmin = (role) => role === 'admin' || role === 'super_admin';
 
@@ -26,6 +27,40 @@ const SettingsTab = ({ token, serverUrl, username, role }) => {
     const [addNodeOpen, setAddNodeOpen] = useState(false);
     const [nodeCredentials, setNodeCredentials] = useState(null);
     const [selectedNode, setSelectedNode] = useState(null);
+
+    const [shares, setShares] = useState([]);
+    const [copiedShareToken, setCopiedShareToken] = useState(null);
+
+    const loadShares = async () => {
+        try {
+            const res = await apiFetch(serverUrl, '/api/share/mine', token);
+            if (res.ok) setShares((await res.json()).shares || []);
+        } catch (e) { /* ignore — section just shows whatever it last had */ }
+    };
+
+    useEffect(() => {
+        if (token) loadShares();
+        else setShares([]);
+    }, [token]);
+
+    const handleCopyShareLink = (shareToken) => {
+        copyToClipboard(`${window.location.origin}/share/${shareToken}`)
+            .then(() => { setCopiedShareToken(shareToken); setTimeout(() => setCopiedShareToken(null), 1500); })
+            .catch(() => alert("Couldn't copy automatically — select the text and copy it manually."));
+    };
+
+    const handleRevokeShare = async (shareToken) => {
+        if (!confirm('Revoke this share link? Anyone using it will lose access immediately.')) return;
+        try {
+            const res = await apiFetch(serverUrl, `/api/share/${shareToken}`, token, { method: 'DELETE' });
+            if (!res.ok) {
+                const data = await parseJsonSafe(res);
+                alert(`Revoke failed: ${data.error || res.statusText}`);
+                return;
+            }
+            loadShares();
+        } catch (e) { alert("Revoke failed: " + e.message); }
+    };
 
     const refreshKunjiLinkStatus = async (t) => {
         try {
@@ -128,6 +163,53 @@ const SettingsTab = ({ token, serverUrl, username, role }) => {
                         </button>
                     </div>
                 </div>
+            </div>
+
+            {/* MY SHARES — available to every logged-in user, matching Account above */}
+            <div className="bg-[#1a1a1a] rounded-xl border border-gray-800 overflow-hidden">
+                <div className="px-6 py-4 border-b border-gray-800 flex justify-between items-center bg-gray-900/50">
+                    <h3 className="font-bold text-white flex items-center gap-2"><Share2 className="w-4 h-4 text-purple-500" /> My Shares</h3>
+                </div>
+                {shares.length === 0 ? (
+                    <div className="p-6 text-sm text-gray-500 italic">No active share links yet — use the Share button on a movie, episode, or series to create one.</div>
+                ) : (
+                    <div className="overflow-x-auto">
+                        <table className="w-full text-left text-sm">
+                            <thead className="bg-gray-800/50 text-gray-400 font-medium text-xs uppercase">
+                                <tr>
+                                    <th className="px-6 py-3">Title</th>
+                                    <th className="px-6 py-3">Type</th>
+                                    <th className="px-6 py-3">Created</th>
+                                    <th className="px-6 py-3">Views</th>
+                                    <th className="px-6 py-3 text-right">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-gray-800">
+                                {shares.map((s) => (
+                                    <tr key={s.token} className="hover:bg-gray-800/30">
+                                        <td className="px-6 py-3 font-bold text-white">{s.title}</td>
+                                        <td className="px-6 py-3">
+                                            <span className="inline-flex items-center gap-1 text-xs text-gray-400">
+                                                {s.shareType === 'series' ? <Tv className="w-3.5 h-3.5" /> : <Film className="w-3.5 h-3.5" />}
+                                                {s.shareType === 'series' ? 'Series' : 'File'}
+                                            </span>
+                                        </td>
+                                        <td className="px-6 py-3 text-gray-400 text-xs">{new Date(s.createdAt).toLocaleDateString()}</td>
+                                        <td className="px-6 py-3 text-gray-400 text-xs">{s.viewCount}</td>
+                                        <td className="px-6 py-3 text-right">
+                                            <button onClick={() => handleCopyShareLink(s.token)} className="inline-flex items-center gap-1 text-xs text-blue-500 hover:text-blue-400 font-medium mr-3">
+                                                {copiedShareToken === s.token ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />} Copy
+                                            </button>
+                                            <button onClick={() => handleRevokeShare(s.token)} className="inline-flex items-center gap-1 text-xs text-red-500 hover:text-red-400 font-medium">
+                                                <Trash2 className="w-3.5 h-3.5" /> Revoke
+                                            </button>
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                )}
             </div>
 
             {isAdmin(role) && (
