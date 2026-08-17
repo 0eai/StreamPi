@@ -593,6 +593,17 @@ fun PlayerScreen(
                 Column(
                     modifier = Modifier.align(Alignment.BottomStart).padding(28.dp).fillMaxWidth()
                 ) {
+                    // Key hints lead the overlay rather than trailing it: they change with focus
+                    // (seek vs. choose), so they are the one line worth reading before you act,
+                    // and at the bottom they sat below the controls they describe.
+                    Text(
+                        if (barFocused) "◀ ▶ choose  ·  OK select  ·  BACK to video"
+                        else "◀ ▶ seek 10s  ·  ▼ controls  ·  OK play/pause",
+                        color = Tokens.muted2,
+                        fontSize = 12.sp
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+
                     // Title and the episode label share one row. 20sp on a single line, not
                     // 32sp wrapping onto two: a scene-release filename ("… 1080p IMAX BRrip HEVC
                     // 10bit AAC 5.1 PoOlL") used to claim two lines on its own, and the overlay
@@ -725,16 +736,9 @@ fun PlayerScreen(
                         )
                     }
 
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        if (barFocused) "◀ ▶ choose  ·  OK select  ·  BACK to video"
-                        else "◀ ▶ seek 10s  ·  ▼ controls  ·  OK play/pause",
-                        color = Tokens.muted2,
-                        fontSize = 12.sp
-                    )
-                    // Added as its own line rather than widened into the status row above:
-                    // that row is a SpaceBetween sharing space with the total-time label, and
-                    // a long reason would push the time off the panel.
+                    // Kept at the bottom, on its own line, rather than folded into the state
+                    // block above: that block is width-capped so the timecode survives, and a
+                    // full failure reason would not fit inside the cap.
                     playerError?.let {
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(it, color = Tokens.danger, fontSize = 13.sp)
