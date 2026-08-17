@@ -17,6 +17,7 @@ import { initNodeDiscoveryListener, startNodeHealthCheck, checkNasHealth } from 
 import { scanLibrary } from './src/mediaPipeline.js';
 import { startSystemStatsSampling } from './src/systemStats.js';
 import { startAutoArchiver } from './src/autoArchiver.js';
+import { startPosterHealer } from './src/posterHealer.js';
 
 import internalRoutes from './src/routes/internal.js';
 import adminRoutes from './src/routes/admin.js';
@@ -24,6 +25,8 @@ import nodeOwnerRoutes from './src/routes/nodeOwner.js';
 import authRoutes from './src/routes/auth.js';
 import statusRoutes from './src/routes/status.js';
 import mediaRoutes from './src/routes/media.js';
+import shareRoutes from './src/routes/share.js';
+import remoteRoutes from './src/routes/remote.js';
 import streamingRoutes, { startStreamStalenessSweep } from './src/routes/streaming.js';
 import torrentsRoutes from './src/routes/torrents.js';
 import telegramRoutes from './src/routes/telegram.js';
@@ -76,6 +79,8 @@ app.use(nodeOwnerRoutes);
 app.use(authRoutes);
 app.use(statusRoutes);
 app.use(mediaRoutes);
+app.use(shareRoutes);
+app.use(remoteRoutes);
 app.use(streamingRoutes);
 app.use(torrentsRoutes);
 app.use(telegramRoutes);
@@ -150,6 +155,7 @@ const startServer = async () => {
 const startBackgroundJobs = async () => {
     startSystemStatsSampling();
     startAutoArchiver();
+    startPosterHealer();
 
     setInterval(cleanOldTempFiles, 60 * 60 * 1000);
     startStreamStalenessSweep();
@@ -186,6 +192,15 @@ const startBackgroundJobs = async () => {
             }
         } catch (e) {
             console.error("Session cleanup error:", e);
+        }
+
+        // remote_commands is a tiny, short-lived polling queue (see routes/remote.js) — a
+        // command is only ever honored within COMMAND_MAX_AGE_MS of being sent, so anything
+        // older than a day is just accumulated dead weight, delivered or not.
+        try {
+            await db.run("DELETE FROM remote_commands WHERE created_at < ?", new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString());
+        } catch (e) {
+            console.error("Remote command cleanup error:", e);
         }
     }, 60 * 60000);
 };

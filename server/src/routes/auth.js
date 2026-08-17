@@ -176,6 +176,42 @@ router.get('/api/auth/me', verifyToken, async (req, res) => {
     } catch (e) { sendServerError(res, e); }
 });
 
+/**
+ * The caller's OWN other logged-in sessions — for a "play on this device" picker.
+ * /api/admin/dashboard already lists sessions, but it's admin-gated and lists every user's,
+ * not "which of these are mine to target."
+ */
+router.get('/api/auth/sessions', verifyToken, async (req, res) => {
+    if (!db) await initDB();
+    try {
+        const currentToken = req.headers.authorization?.split('Bearer ')[1] || req.query.token;
+        const rows = await db.all(
+            // device_type = 'Node' is a real session (node/public/app.js's own dashboard
+            // login, against this same account system), but it's a monitoring UI with no
+            // player and nothing polling /api/remote/pending — never a valid cast target.
+            "SELECT token, device, device_type, last_active FROM sessions WHERE username = ? AND last_active > ? AND device_type != 'Node'",
+            [req.user.username, Date.now() - 5 * 60 * 1000]
+        );
+        // The TV app's two login paths disagree with each other and with web_client's own
+        // getDeviceInfo() on what device_type a TV reports: password login sends the literal
+        // string "Android TV", kunji login sends nothing at all (defaults to 'Web Browser'
+        // here), and an actual TV *browser* sends 'TV'. Normalized once here so every consumer
+        // (the cast-target picker) doesn't have to re-derive this same fuzzy match itself.
+        const sessions = rows.map(s => {
+            const isTv = s.device_type === 'TV' || s.device_type === 'Android TV' || /\btv\b/i.test(s.device || '');
+            return {
+                token: s.token,
+                device: s.device,
+                deviceType: s.device_type,
+                deviceKind: isTv ? 'tv' : (s.device_type === 'Mobile' ? 'mobile' : 'desktop'),
+                lastActive: s.last_active,
+                isCurrent: s.token === currentToken,
+            };
+        });
+        res.json({ sessions });
+    } catch (e) { sendServerError(res, e); }
+});
+
 router.post('/api/auth/change-password', verifyToken, async (req, res) => {
     const { oldPassword, newPassword } = req.body;
     const username = req.user.username;

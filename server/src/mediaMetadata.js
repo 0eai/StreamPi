@@ -47,7 +47,11 @@ export const extractMetadata = (filePath) => {
             if (existsSync(thumbPath)) return finish({ duration, poster: thumbName, needsTranscode });
 
             screenshotCmd = ffmpeg(filePath)
-                .on('error', () => finish({ duration: 0, poster: null, needsTranscode }))
+                // `duration`, not 0 — ffprobe already succeeded by this point; only the
+                // screenshot step failed. Discarding a perfectly good duration here (as this
+                // used to) is exactly how a poster-generation failure under load also took the
+                // duration down with it, with nothing afterward to ever recover either one.
+                .on('error', () => finish({ duration, poster: null, needsTranscode }))
                 .on('end', () => finish({ duration, poster: thumbName, needsTranscode }))
                 .screenshots({ count: 1, timestamps: ['10%'], folder: THUMB_FOLDER, filename: thumbName, size: '320x?' });
         });

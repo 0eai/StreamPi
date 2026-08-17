@@ -153,6 +153,7 @@ router.post('/api/media/toggle-privacy', verifyToken, async (req, res) => {
             [newPath, isGoingPrivate ? 1 : 0, owner, currentPath]);
 
         await db.run("UPDATE history SET media_path = ? WHERE media_path = ?", [newPath, currentPath]);
+        await db.run("UPDATE shares SET media_path = ? WHERE media_path = ?", [newPath, currentPath]);
 
         await logActivity(req.user.username, "PRIVACY", `Marked ${item.filename} as ${isGoingPrivate ? 'Private' : 'Public'}`, req.ip);
 
@@ -189,11 +190,43 @@ const probeMediaInfo = async (req, res) => {
 
     console.log(`ℹ️ [Media Info] Probing: ${filePath}`);
 
+    const EMPTY_PROBE = { fileSize: 0, container: {}, video: null, audioTracks: [], subtitleTracks: [], attachments: [] };
+
+    // ffprobe reports a rate as "num/den" (e.g. "25/1", "24000/1001") — never a bare number.
+    const parseFrameRate = (rate) => {
+        if (!rate) return null;
+        const [num, den] = rate.split('/').map(Number);
+        if (!den) return num || null;
+        return Math.round((num / den) * 100) / 100;
+    };
+
     const formatResponse = (metadata) => {
         try {
             const fileSize = metadata.format && metadata.format.size
                 ? parseInt(metadata.format.size, 10)
                 : 0;
+
+            const fmtTags = metadata.format?.tags || {};
+            const container = {
+                duration: metadata.format?.duration ? parseFloat(metadata.format.duration) : null,
+                bitrate: metadata.format?.bit_rate ? parseInt(metadata.format.bit_rate, 10) : null,
+                title: fmtTags.title || fmtTags.TITLE || null,
+                encoder: fmtTags.encoder || null,
+                creationTime: fmtTags.creation_time || null,
+            };
+
+            // A cover-art/logo image (the "(attached pic)" stream in ffmpeg's own -i output)
+            // reports codec_type 'video' too — excluded here so it doesn't get picked as *the*
+            // video stream, and listed separately below instead.
+            const videoStream = metadata.streams.find(s => s.codec_type === 'video' && s.disposition?.attached_pic !== 1);
+            const video = videoStream ? {
+                codec: videoStream.codec_name,
+                width: videoStream.width || null,
+                height: videoStream.height || null,
+                fps: parseFrameRate(videoStream.avg_frame_rate || videoStream.r_frame_rate),
+                bitrate: videoStream.bit_rate ? parseInt(videoStream.bit_rate, 10) : null,
+                profile: videoStream.profile || null,
+            } : null;
 
             const audioTracks = metadata.streams
                 .filter(s => s.codec_type === 'audio')
@@ -201,7 +234,11 @@ const probeMediaInfo = async (req, res) => {
                     index: i,
                     label: s.tags?.title || s.tags?.language || s.codec_name || `Audio ${i + 1}`,
                     language: s.tags?.language || 'und',
-                    codec: s.codec_name
+                    codec: s.codec_name,
+                    channels: s.channels || null,
+                    sampleRate: s.sample_rate ? parseInt(s.sample_rate, 10) : null,
+                    title: s.tags?.title || null,
+                    isDefault: s.disposition?.default === 1,
                 }));
 
             const subtitleTracks = metadata.streams
@@ -210,13 +247,21 @@ const probeMediaInfo = async (req, res) => {
                     index: s.index,
                     label: s.tags?.title || s.tags?.language || s.codec_name || `Subtitle ${s.index}`,
                     language: s.tags?.language || 'en',
-                    codec: s.codec_name
+                    codec: s.codec_name,
+                    title: s.tags?.title || null,
                 }));
 
-            return { fileSize, audioTracks, subtitleTracks };
+            const attachments = metadata.streams
+                .filter(s => s.codec_type === 'attachment' || s.disposition?.attached_pic === 1)
+                .map(s => ({
+                    filename: s.tags?.filename || null,
+                    mimetype: s.tags?.mimetype || null,
+                }));
+
+            return { fileSize, container, video, audioTracks, subtitleTracks, attachments };
         } catch (e) {
             console.error("Metadata parse error:", e);
-            return { fileSize: 0, audioTracks: [], subtitleTracks: [] };
+            return EMPTY_PROBE;
         }
     };
 
@@ -237,13 +282,13 @@ const probeMediaInfo = async (req, res) => {
         ], { timeout: 15000 }, (error, stdout, stderr) => {
             if (error) {
                 console.error("NAS Probe Error:", stderr);
-                return res.json({ fileSize: 0, audioTracks: [], subtitleTracks: [] });
+                return res.json(EMPTY_PROBE);
             }
             try {
                 const metadata = JSON.parse(stdout);
                 res.json(formatResponse(metadata));
             } catch (e) {
-                res.json({ fileSize: 0, audioTracks: [], subtitleTracks: [] });
+                res.json(EMPTY_PROBE);
             }
         });
     }
@@ -535,6 +580,7 @@ router.post('/api/media/nas-action', verifyToken, async (req, res) => {
             // (harmless) instead of a DB row pointing at a path that no longer exists at all.
             await db.run("UPDATE media SET path = ?, is_archived = 1 WHERE path = ?", [newPath, filePath]);
             await db.run("UPDATE history SET media_path = ? WHERE media_path = ?", [newPath, filePath]);
+            await db.run("UPDATE shares SET media_path = ? WHERE media_path = ?", [newPath, filePath]);
 
             await fs.unlink(filePath);
 
@@ -602,6 +648,7 @@ router.post('/api/media/nas-action', verifyToken, async (req, res) => {
 
                 await db.run("UPDATE media SET path = ?, is_archived = 0 WHERE path = ?", [localPath, filePath]);
                 await db.run("UPDATE history SET media_path = ? WHERE media_path = ?", [localPath, filePath]);
+                await db.run("UPDATE shares SET media_path = ? WHERE media_path = ?", [localPath, filePath]);
 
                 return res.json({ success: true, message: "Restored to Local", newPath: localPath });
             } catch (e) {
@@ -681,6 +728,7 @@ router.post('/api/media/move', verifyToken, async (req, res) => {
         await fs.rename(srcPath, destPath).catch(async()=>{ await fs.copyFile(srcPath, destPath); await fs.unlink(srcPath); });
         await db.run("UPDATE media SET path = ?, is_archived = ?, is_private = 0 WHERE path = ?", [destPath, isArchived, srcPath]);
         await db.run("UPDATE history SET media_path = ? WHERE media_path = ?", [destPath, srcPath]);
+        await db.run("UPDATE shares SET media_path = ? WHERE media_path = ?", [destPath, srcPath]);
         await logActivity(req.user.username, "MOVE", `Moved ${path.basename(srcPath)} to ${path.basename(destPath)}`, req.ip);
         res.json({ success: true, newPath: destPath });
     } catch (e) { sendServerError(res, e); }
@@ -713,6 +761,7 @@ router.delete('/api/media', verifyToken, async (req, res) => {
         const result = await db.run('DELETE FROM media WHERE path = ?', [filePath]);
         if (result.changes === 0) return res.status(409).json({ error: "File was modified by another request — please retry." });
         await db.run('DELETE FROM history WHERE media_path = ?', [filePath]);
+        await db.run('DELETE FROM shares WHERE media_path = ?', [filePath]);
 
         if (existsSync(filePath)) await fs.unlink(filePath).catch(() => {});
         if (item.poster) {
@@ -740,6 +789,7 @@ router.delete('/api/series/:name', verifyToken, async (req, res) => {
         for (const item of deletable) {
             await db.run('DELETE FROM media WHERE path = ?', [item.path]);
             await db.run('DELETE FROM history WHERE media_path = ?', [item.path]);
+            await db.run('DELETE FROM shares WHERE media_path = ?', [item.path]);
             if (existsSync(item.path)) await fs.unlink(item.path).catch(() => {});
             if (item.poster) {
                 const thumbPath = path.join(THUMB_FOLDER, item.poster);
@@ -789,6 +839,7 @@ router.patch('/api/series/:name', verifyToken, async (req, res) => {
         for (const item of editable) {
             await db.run("UPDATE media SET series_name = ? WHERE path = ?", [newName.trim(), item.path]);
         }
+        await db.run("UPDATE shares SET series_name = ? WHERE series_name = ? AND share_type = 'series'", [newName.trim(), seriesName]);
 
         await logActivity(req.user.username, "EDIT", `Renamed series "${seriesName}" to "${newName.trim()}"`, req.ip);
         res.json({ success: true, renamed: editable.length, skipped: rows.length - editable.length });

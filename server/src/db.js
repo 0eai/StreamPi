@@ -78,6 +78,41 @@ export const initDB = async () => {
 
         await db.exec(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);`);
 
+        await db.exec(`
+            CREATE TABLE IF NOT EXISTS shares (
+                token TEXT PRIMARY KEY,
+                share_type TEXT NOT NULL,
+                media_path TEXT,
+                series_name TEXT,
+                owner_username TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT,
+                revoked INTEGER NOT NULL DEFAULT 0,
+                last_accessed_at TEXT,
+                view_count INTEGER NOT NULL DEFAULT 0
+            );
+        `);
+        await db.run("CREATE INDEX IF NOT EXISTS idx_shares_media_path ON shares(media_path)");
+        await db.run("CREATE INDEX IF NOT EXISTS idx_shares_series ON shares(series_name, owner_username)");
+        await db.run("CREATE INDEX IF NOT EXISTS idx_shares_owner ON shares(owner_username)");
+
+        // "Play on device X" commands, sent by one of a user's own logged-in sessions and
+        // picked up by another — a lightweight polled queue, same shape as telegram_files'
+        // status column (queued/downloading/...), rather than anything push/WebSocket-based
+        // (this app has no such infrastructure anywhere else).
+        await db.exec(`
+            CREATE TABLE IF NOT EXISTS remote_commands (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                target_token TEXT NOT NULL,
+                media_path TEXT NOT NULL,
+                start_time REAL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                created_by_username TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending'
+            );
+        `);
+        await db.run("CREATE INDEX IF NOT EXISTS idx_remote_commands_target ON remote_commands(target_token, status)");
+
         const adminUser = await db.get("SELECT id, role FROM users WHERE username = 'admin'");
         if (adminUser) {
             if (adminUser.role !== 'super_admin') {
@@ -120,7 +155,14 @@ export const initDB = async () => {
             // can never succeed retried forever every 30s/60s and, since both always pick the
             // single oldest pending row, permanently blocked every other file behind it.
             "ALTER TABLE media ADD COLUMN transcode_attempts INTEGER DEFAULT 0",
-            "ALTER TABLE media ADD COLUMN archive_attempts INTEGER DEFAULT 0"
+            "ALTER TABLE media ADD COLUMN archive_attempts INTEGER DEFAULT 0",
+
+            // Same reasoning as the two counters above, for posterHealer.js's retry loop —
+            // without a cap, a file whose poster can never be generated (genuinely corrupt,
+            // not just a one-off timeout) would retry every tick forever and, since that job
+            // always picks the single oldest still-failing row, permanently block every other
+            // file behind it from ever being healed.
+            "ALTER TABLE media ADD COLUMN poster_attempts INTEGER DEFAULT 0"
         ];
 
         for (const sql of migrations) {
