@@ -48,6 +48,7 @@ import com.example.streampitv.util.Codecs
 import com.example.streampitv.util.formatDuration
 import com.example.streampitv.util.catching
 import com.example.streampitv.util.nasOfflineNotice
+import com.example.streampitv.util.shouldKeepScreenOn
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.net.URLEncoder
@@ -75,6 +76,10 @@ fun PlayerScreen(
     // Playback status is mirrored from the player rather than tracked by hand: a flag set
     // only by our own toggle reads "Playing" even while the stream is stalled or dead.
     var isPlaying by remember { mutableStateOf(false) }
+    // Tracked separately from isPlaying because it is what drives the keep-screen-on flag:
+    // isPlaying goes false during buffering, playWhenReady stays true. Starts true because
+    // playback is started unconditionally below (exoPlayer.playWhenReady = true).
+    var playWhenReady by remember { mutableStateOf(true) }
     var isBuffering by remember { mutableStateOf(true) }
     var playerError by remember { mutableStateOf<String?>(null) }
 
@@ -197,6 +202,10 @@ fun PlayerScreen(
         val listener = object : Player.Listener {
             override fun onIsPlayingChanged(playing: Boolean) {
                 isPlaying = playing
+            }
+
+            override fun onPlayWhenReadyChanged(ready: Boolean, reason: Int) {
+                playWhenReady = ready
             }
 
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
@@ -420,7 +429,15 @@ fun PlayerScreen(
                     applySubtitleStyle(this)
                 }
             },
-            update = { applySubtitleStyle(it) },
+            update = { view ->
+                applySubtitleStyle(view)
+                // Set on the view, not as FLAG_KEEP_SCREEN_ON on the activity window: it
+                // resolves to the same window flag, but scoped to this view, so it cannot
+                // outlive PlayerScreen and leave Home or Settings pinned awake if a dispose
+                // is ever skipped. See util/ScreenWake.kt for why playWhenReady and not
+                // isPlaying.
+                view.keepScreenOn = shouldKeepScreenOn(playWhenReady, countdown > 0)
+            },
             modifier = Modifier.fillMaxSize()
                 .focusRequester(focusRequester)
                 .focusable()

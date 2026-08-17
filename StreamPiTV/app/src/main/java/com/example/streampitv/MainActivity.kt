@@ -27,6 +27,7 @@ import com.example.streampitv.ui.screens.PlayerScreen
 import com.example.streampitv.ui.screens.ServerConfigScreen
 import com.example.streampitv.ui.screens.SeriesDetailScreen
 import com.example.streampitv.ui.screens.SettingsScreen
+import com.example.streampitv.util.SessionExpiry
 import com.example.streampitv.util.catching
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -52,6 +53,9 @@ fun StreamPiApp(context: Context) {
     var username by remember { mutableStateOf<String?>(null) }
     var role by remember { mutableStateOf<String?>(null) }
     var isLoaded by remember { mutableStateOf(false) }
+    // Shown on the login screen after an involuntary sign-out, so an expired session doesn't
+    // look like the app randomly logging the user out.
+    var loginNotice by remember { mutableStateOf<String?>(null) }
 
     // New State: Track if we should run auto-discovery when entering ServerConfigScreen
     var shouldAutoDiscover by remember { mutableStateOf(true) }
@@ -60,6 +64,53 @@ fun StreamPiApp(context: Context) {
     // composition whenever the player or series detail opens, which would otherwise
     // discard its tab, scroll position, library and focus on every return.
     val homeState = remember { HomeState() }
+
+    /**
+     * The one way out of a signed-in state, shared by the Settings sign-out button and by an
+     * expired session. Clearing the persisted token is the part that matters: leaving it in
+     * DataStore is what used to make a dead session survive a relaunch.
+     *
+     * Every screen flag is reset too, not just the token. The series-detail branch below is
+     * `selectedSeries != null` with no token check (unlike the player and settings branches),
+     * so clearing the token alone would strand the user on a screen that can only 401.
+     *
+     * [callLogout] must be false when the token is already known-dead: that request would 401,
+     * the interceptor would signal expiry again, and this would run in a loop.
+     */
+    suspend fun clearSession(callLogout: Boolean) {
+        val dying = token
+        if (callLogout && dying != null && serverUrl != null) {
+            // Tell the server to drop the session row first. Clearing only the local copy left
+            // the session valid until the 7-day inactivity sweep, so a "signed out" TV still
+            // counted as an active device. Best-effort: a failure must not strand the user.
+            catching { ApiClient.of(serverUrl!!).logout("Bearer $dying") }
+                .onFailure { Log.w("StreamPi", "logout call failed: ${it.message}") }
+        }
+        context.dataStore.edit {
+            it.remove(Prefs.AUTH_TOKEN)
+            it.remove(Prefs.USERNAME)
+            it.remove(Prefs.ROLE)
+        }
+        username = null
+        role = null
+        token = null
+        activeVideo = null
+        selectedSeries = null
+        showSettings = false
+        homeState.library = null
+    }
+
+    // The server deletes sessions after 7 days of inactivity, and every authenticated call then
+    // 401s. Without this the app sat on an infinite spinner and only a reinstall cleared it.
+    LaunchedEffect(Unit) {
+        SessionExpiry.events.collect {
+            // Idempotent: several concurrent polls can each 401 and signal.
+            if (token == null) return@collect
+            Log.w("StreamPi", "session rejected by server, signing out")
+            clearSession(callLogout = false)
+            loginNotice = "Your session expired. Please sign in again."
+        }
+    }
 
     LaunchedEffect(Unit) {
         val prefs = context.dataStore.data.first()
@@ -102,28 +153,7 @@ fun StreamPiApp(context: Context) {
                 token = token!!,
                 storedUsername = username,
                 storedRole = role,
-                onSignOut = {
-                    val signingOut = token
-                    scope.launch {
-                        // Tell the server to drop the session row first. Clearing only the
-                        // local copy left the session valid until the 72-hour sweep, so a
-                        // "signed out" TV still counted as an active device. Best-effort:
-                        // a failure here must not strand the user on this screen.
-                        if (signingOut != null) {
-                            catching { ApiClient.of(serverUrl!!).logout("Bearer $signingOut") }
-                                .onFailure { Log.w("StreamPi", "logout call failed: ${it.message}") }
-                        }
-                        context.dataStore.edit {
-                            it.remove(Prefs.AUTH_TOKEN)
-                            it.remove(Prefs.USERNAME)
-                            it.remove(Prefs.ROLE)
-                        }
-                        username = null
-                        role = null
-                        token = null
-                        showSettings = false
-                    }
-                },
+                onSignOut = { scope.launch { clearSession(callLogout = true) } },
                 onBack = { showSettings = false }
             )
         } else if (selectedSeries != null) {
@@ -146,7 +176,9 @@ fun StreamPiApp(context: Context) {
         } else {
             LoginScreen(
                 serverUrl = serverUrl!!,
+                notice = loginNotice,
                 onLoginSuccess = { newToken, newUsername, newRole ->
+                    loginNotice = null
                     scope.launch {
                         context.dataStore.edit {
                             it[Prefs.AUTH_TOKEN] = newToken

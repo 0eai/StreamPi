@@ -57,6 +57,9 @@ private const val POLL_INTERVAL_MS = 2_000L
 @Composable
 fun LoginScreen(
     serverUrl: String,
+    /** Why the user is looking at this screen when they did not ask to sign out — currently
+     *  only set when the stored session was rejected as expired. */
+    notice: String? = null,
     onLoginSuccess: (token: String, username: String?, role: String?) -> Unit,
     onResetServer: () -> Unit
 ) {
@@ -384,6 +387,18 @@ fun LoginScreen(
                     SecondaryButton("Retry", icon = Icons.Default.Refresh) { attempt++ }
                 }
             }
+        }
+
+        // Overlaid at the top rather than placed inside each phase's layout: it has to appear
+        // whichever phase is showing, and the QR phase is already fighting for every dp of a
+        // 540dp-tall panel.
+        if (notice != null) {
+            Text(
+                notice,
+                color = Tokens.warning,
+                fontSize = 13.sp,
+                modifier = Modifier.align(Alignment.TopCenter)
+            )
         }
     }
 }

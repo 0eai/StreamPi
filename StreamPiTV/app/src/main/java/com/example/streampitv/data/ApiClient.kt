@@ -1,5 +1,8 @@
 package com.example.streampitv.data
 
+import com.example.streampitv.util.SessionExpiry
+import com.example.streampitv.util.isSessionExpiry
+import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
@@ -17,10 +20,26 @@ object ApiClient {
     private val standard = mutableMapOf<String, ApiService>()
     private val long = mutableMapOf<String, ApiService>()
 
+    /**
+     * Turns "the server rejected our credential" into one app-wide signal, so no call site has
+     * to remember to handle it. Every authenticated call goes through here; see
+     * [SessionExpiry] for why a 401 without an Authorization header is deliberately ignored,
+     * and for why this must not be extended to ExoPlayer's data source.
+     */
+    private val sessionExpiryInterceptor = Interceptor { chain ->
+        val request = chain.request()
+        val response = chain.proceed(request)
+        if (isSessionExpiry(response.code, request.header("Authorization") != null)) {
+            SessionExpiry.signal()
+        }
+        response
+    }
+
     private val standardHttp: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(60, TimeUnit.SECONDS)
+            .addInterceptor(sessionExpiryInterceptor)
             .build()
     }
 
@@ -29,6 +48,7 @@ object ApiClient {
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.MINUTES)
             .writeTimeout(30, TimeUnit.MINUTES)
+            .addInterceptor(sessionExpiryInterceptor)
             .build()
     }
 

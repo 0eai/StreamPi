@@ -76,16 +76,24 @@ fun HomeScreen(
     // Opened with the remote's MENU key, so a destructive option can live alongside
     // archive/restore behind a confirm step without colliding with OK.
     var actionsFor by remember { mutableStateOf<VideoItem?>(null) }
+    // Distinguishes "still loading" from "the fetch failed and there is nothing to show".
+    // Without it both rendered the same endless spinner.
+    var loadFailed by remember { mutableStateOf(false) }
 
     // Refetch on every entry: returning from the player means progress moved, so resume
     // bars and Continue Watching ordering are stale. The old library stays on screen while
     // this runs, so it refreshes in place rather than flashing a spinner.
     LaunchedEffect(serverUrl, token, refreshKey) {
+        loadFailed = false
         try {
             state.library = api.getLibrary(bearer).sortedForDisplay()
         } catch (e: Exception) {
             Log.e("StreamPi", "Fetch library failed", e)
-            if (e is retrofit2.HttpException && e.code() == 401) Log.w("StreamPi", "library returned 401")
+            // A 401 is handled globally (ApiClient's interceptor signals SessionExpiry and
+            // MainActivity signs out), so nothing to do here beyond not pretending to load
+            // forever. Anything else — server down, DNS, timeout — lands on the retry state
+            // below, which used to be an indistinguishable infinite spinner.
+            loadFailed = true
         }
     }
 
@@ -119,6 +127,24 @@ fun HomeScreen(
             return
         }
         onPlayVideo(v)
+    }
+
+    // Lets another of this account's sessions (e.g. the phone's web_client) tell this TV to
+    // start playing something — a lightweight polled command, same idle-screen cadence as the
+    // NAS-availability check above, since this app has no push/WebSocket channel to be told
+    // immediately. Only path/startTime travel over the wire; every other VideoItem field is
+    // optional and gets filled in once the player's own metadata fetch runs, same as it does
+    // for a normal tap in this same list.
+    LaunchedEffect(serverUrl, token) {
+        while (true) {
+            catching { api.getPendingRemoteCommand(bearer) }
+                .onSuccess { resp ->
+                    resp.command?.let { cmd ->
+                        playVideo(VideoItem(title = null, filename = null, path = cmd.path, poster = null, progress = cmd.startTime))
+                    }
+                }
+            delay(5_000)
+        }
     }
 
     /**
@@ -176,7 +202,37 @@ fun HomeScreen(
             Modifier.fillMaxSize().background(Tokens.bg),
             contentAlignment = Alignment.Center
         ) {
-            CircularProgressIndicator(color = Tokens.accent)
+            if (loadFailed) {
+                // An offer to act, not just an error: on a TV there is nowhere else to go, and
+                // the alternative was a spinner that never resolved.
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        "Can't reach the server",
+                        color = Tokens.text,
+                        fontSize = 22.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(serverUrl, color = Tokens.muted2, fontSize = 13.sp)
+                    Spacer(Modifier.height(24.dp))
+                    FocusableItem(onClick = { refreshKey++ }) { focused ->
+                        Text(
+                            "Retry",
+                            color = if (focused) Tokens.text else Tokens.muted,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier
+                                .background(
+                                    if (focused) Tokens.accent else Tokens.surface2,
+                                    RoundedCornerShape(8.dp)
+                                )
+                                .padding(horizontal = 28.dp, vertical = 12.dp)
+                        )
+                    }
+                }
+            } else {
+                CircularProgressIndicator(color = Tokens.accent)
+            }
         }
         return
     }
