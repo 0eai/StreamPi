@@ -201,7 +201,16 @@ fun HomeScreen(
                     Spacer(Modifier.height(8.dp))
                     Text(serverUrl, color = Tokens.muted2, fontSize = 13.sp)
                     Spacer(Modifier.height(24.dp))
-                    FocusableItem(onClick = { refreshKey++ }) { focused ->
+                    // Compose does not focus anything by default, and this screen has exactly
+                    // one control — without the request the first OK press does nothing and the
+                    // user has to discover that an arrow key wakes it up. Same explicit-focus
+                    // convention the login, settings and action-sheet screens follow.
+                    val retryFocus = remember { FocusRequester() }
+                    LaunchedEffect(Unit) { runCatching { retryFocus.requestFocus() } }
+                    FocusableItem(
+                        onClick = { refreshKey++ },
+                        modifier = Modifier.focusRequester(retryFocus)
+                    ) { focused ->
                         Text(
                             "Retry",
                             color = if (focused) Tokens.text else Tokens.muted,

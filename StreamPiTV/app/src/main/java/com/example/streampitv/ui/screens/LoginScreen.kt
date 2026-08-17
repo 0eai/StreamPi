@@ -404,12 +404,21 @@ fun LoginScreen(
         // Overlaid at the top rather than placed inside each phase's layout: it has to appear
         // whichever phase is showing, and the QR phase is already fighting for every dp of a
         // 540dp-tall panel.
+        //
+        // Top-START, not top-centre: centred it lands on top of the QR's white plate, which
+        // reads as a rendering fault and eats into the quiet zone a scanner needs. The left
+        // column is dark in every phase, and the width cap keeps it clear of the code even if
+        // the copy grows.
         if (notice != null) {
             Text(
                 notice,
                 color = Tokens.warning,
                 fontSize = 13.sp,
-                modifier = Modifier.align(Alignment.TopCenter)
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .widthIn(max = 420.dp)
+                    .background(Tokens.surface2, RoundedCornerShape(8.dp))
+                    .padding(horizontal = 14.dp, vertical = 8.dp)
             )
         }
     }
