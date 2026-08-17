@@ -49,15 +49,17 @@ import com.example.streampitv.util.formatDuration
 import com.example.streampitv.util.catching
 import com.example.streampitv.util.nasOfflineNotice
 import com.example.streampitv.util.shouldKeepScreenOn
+import com.example.streampitv.util.streamUrl
+import com.example.streampitv.util.subtitleUrl
+import com.example.streampitv.util.totalDurationSec
+import com.example.streampitv.util.AppScope
+import java.util.UUID
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import java.net.URLEncoder
 import com.example.streampitv.ui.theme.Tokens
 
 /** Synthetic language tag per sideloaded subtitle, so a track can be selected unambiguously. */
 private fun subLang(index: Int) = "t$index"
-
-private fun enc(s: String): String = URLEncoder.encode(s, "UTF-8")
 
 @Composable
 fun PlayerScreen(
@@ -125,21 +127,49 @@ fun PlayerScreen(
     val restartFocus = remember { FocusRequester() }
     val exoPlayer = remember { ExoPlayer.Builder(context).build() }
 
-    val totalSec = remember(item.path, item.duration) { item.duration.toLong() }
+    // rememberUpdatedState, NOT remember(keys): the progress-sync loop below reads this from
+    // inside a long-lived coroutine, and a plain val recomputed per recomposition would leave
+    // that coroutine holding whatever the value was when it launched — 0 for a cast-launched
+    // item, whose duration only arrives with the probe. A delegated State is read live.
+    val totalSec by rememberUpdatedState(totalDurationSec(item, info))
+
+    // One id per player mount, deliberately not per URL: /api/stream/end releases every
+    // ACTIVE_STREAMS entry carrying the id, so a single teardown reclaims the entries left by a
+    // transcoded seek, an audio-track switch, a token re-mint and the previous autoplay episode.
+    // Matches the web client's CustomVideoPlayer, so the two need one mental model.
+    val streamSessionId = remember { UUID.randomUUID().toString() }
 
     fun logicalPos(): Double = offsetSec + exoPlayer.currentPosition / 1000.0
 
-    DisposableEffect(Unit) { onDispose { exoPlayer.release() } }
+    DisposableEffect(Unit) {
+        onDispose {
+            // Release first: closing the sockets fires the server's own close/error handlers for
+            // anything still in flight.
+            exoPlayer.release()
+            // Then mop up entries that were fully delivered but are still registered on an open
+            // keep-alive connection, where no server-side event ever fires. Launched on
+            // AppScope, not rememberCoroutineScope: that scope is cancelled at exactly this
+            // moment, so the request would never leave the device.
+            AppScope.launch {
+                catching { api.endStream(bearer, streamSessionId) }
+                    .onFailure { Log.w("StreamPi", "stream/end failed: ${it.message}") }
+            }
+        }
+    }
 
     LaunchedEffect(Unit) { focusRequester.requestFocus() }
 
     // ── Mint the media token ────────────────────────────────────────────────
     LaunchedEffect(mintAttempt) {
-        mediaToken = catching { api.streamToken(bearer).token }
-            .onFailure { Log.w("StreamPi", "stream-token unavailable, using session token: ${it.message}") }
-            .getOrNull()
-            ?.takeIf { it.isNotBlank() }
-            ?: token
+        // The session-token fallback is deliberately narrow: only a 404 means "this server
+        // predates /api/auth/stream-token" (verifyToken still accepts a session token on the
+        // query string). Falling back on a 401 would paper over a dead session, which
+        // ApiClient's interceptor is already signalling for a clean sign-out.
+        val minted = catching { api.streamToken(bearer).token }
+            .onFailure { Log.w("StreamPi", "stream-token mint failed: ${it.message}") }
+        val status = (minted.exceptionOrNull() as? retrofit2.HttpException)?.code()
+        mediaToken = minted.getOrNull()?.takeIf { it.isNotBlank() }
+            ?: if (status == null || status == 404) token else null
     }
 
     // ── Probe tracks whenever the item changes ──────────────────────────────
@@ -170,16 +200,19 @@ fun PlayerScreen(
         pendingStart = start
         offsetResolved = false
 
-        val url = buildString {
-            append("$serverUrl/api/stream?path=${enc(item.path)}&token=${enc(mt)}")
-            append("&track=$audioTrack")
-            append("&codecs=${enc(Codecs.supported)}")
-            if (start > 0) append("&startTime=$start")
-        }
+        val url = streamUrl(
+            serverUrl = serverUrl,
+            path = item.path,
+            token = mt,
+            audioTrack = audioTrack,
+            codecs = Codecs.supported,
+            sessionId = streamSessionId,
+            startTime = start
+        )
 
         val subs = probe.subtitleTracks.map { t ->
             MediaItem.SubtitleConfiguration.Builder(
-                Uri.parse("$serverUrl/api/subtitle?path=${enc(item.path)}&index=${t.index}&token=${enc(mt)}")
+                Uri.parse(subtitleUrl(serverUrl, item.path, t.index, mt))
             )
                 .setMimeType(MimeTypes.TEXT_VTT)
                 .setLanguage(subLang(t.index))
@@ -213,7 +246,8 @@ fun PlayerScreen(
                 // the server's memory, so a restart invalidates one mid-playback. Mint a
                 // fresh one and resume where we were instead of showing a dead end. Capped,
                 // so a genuinely rejected session cannot spin.
-                if (isUnauthorized(error) && authRetries < 2) {
+                val status = httpStatusOf(error)
+                if (status == 401 && authRetries < 2) {
                     authRetries++
                     Log.w("StreamPi", "media token rejected, re-minting (attempt $authRetries)")
                     resumeAt = logicalPos()
@@ -224,7 +258,15 @@ fun PlayerScreen(
                 // Without this a failed stream is an indefinite black screen that still
                 // claims to be playing. 409 not_ready and 503 busy both land here.
                 Log.e("StreamPi", "Playback error: ${error.errorCodeName}", error)
-                playerError = error.errorCodeName
+                playerError = when {
+                    // The node holding an archived file is down, so neither streaming nor
+                    // restoring can read it — worth naming, since the fix is elsewhere.
+                    status == 503 && item.isOnNas -> nasOfflineNotice(item)
+                    status == 503 -> "Server busy — too many streams right now"
+                    status == 403 -> "Not available to this account"
+                    status == 404 -> "This file is no longer on the server"
+                    else -> error.errorCodeName
+                }
                 isBuffering = false
                 isControlsVisible = true
             }
@@ -274,6 +316,12 @@ fun PlayerScreen(
             if (!exoPlayer.isPlaying) continue
             val dur = if (totalSec > 0) totalSec else (exoPlayer.duration / 1000).coerceAtLeast(0)
             if (dur <= 0) continue
+            // The player-duration fallback above is only safe for a direct play. On a transcoded
+            // stream it is the REMAINING span, so it would claim a runtime shorter than the
+            // position being reported alongside it, and the server's progress/duration >= 0.95
+            // test then evicts the item from Continue Watching for good. Skipping a sync costs
+            // one resume point; sending this poisons the history row.
+            if (totalSec <= 0 && isTranscoded) continue
             runCatching {
                 api.saveProgress(bearer, ProgressRequest(item.path, logicalPos().toLong(), dur))
             }.onFailure { Log.e("StreamPi", "Sync progress failed", it) }
@@ -612,6 +660,13 @@ fun PlayerScreen(
                         color = Tokens.muted2,
                         fontSize = 12.sp
                     )
+                    // Added as its own line rather than widened into the status row above:
+                    // that row is a SpaceBetween sharing space with the total-time label, and
+                    // a long reason would push the time off the panel.
+                    playerError?.let {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(it, color = Tokens.danger, fontSize = 13.sp)
+                    }
                 }
             }
 
@@ -700,14 +755,19 @@ private fun applySubtitleStyle(view: PlayerView) {
     }
 }
 
-/** True when a playback failure was an HTTP 401 anywhere in its cause chain. */
-private fun isUnauthorized(error: androidx.media3.common.PlaybackException): Boolean {
+/**
+ * HTTP status behind a playback failure, if its cause chain carries one.
+ *
+ * Generalised from an is-it-401 predicate because the other statuses this server produces are
+ * each actionable to the viewer in a different way, and "Playback failed" told them none of it.
+ */
+private fun httpStatusOf(error: androidx.media3.common.PlaybackException): Int? {
     var c: Throwable? = error
     while (c != null) {
-        if (c is androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException &&
-            c.responseCode == 401
-        ) return true
+        if (c is androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException) {
+            return c.responseCode
+        }
         c = c.cause
     }
-    return false
+    return null
 }

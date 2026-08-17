@@ -71,6 +71,21 @@ interface ApiService {
     @POST("/api/auth/stream-token")
     suspend fun streamToken(@Header("Authorization") token: String): StreamTokenResponse
 
+    /**
+     * Releases every server-side stream entry tagged with this playback's sessionId, scoped
+     * server-side to the caller's own username.
+     *
+     * Query params only and no body — the web client reaches this via navigator.sendBeacon,
+     * which cannot set either. Without it an abandoned stream sits in ACTIVE_STREAMS for the
+     * full 30-minute staleness window, holding an ffmpeg process for a transcode and inflating
+     * the stream count this app shows in its own stats bar. 404s on older servers.
+     */
+    @POST("/api/stream/end")
+    suspend fun endStream(
+        @Header("Authorization") token: String,
+        @Query("sessionId") sessionId: String
+    ): OkResponse
+
     /** Added to the server for this app; 404s on older builds, so callers must tolerate it. */
     @GET("/api/auth/me")
     suspend fun me(@Header("Authorization") token: String): MeResponse
@@ -98,4 +113,13 @@ interface ApiService {
 
     @GET("/api/status/storage")
     suspend fun getStorageStatus(@Header("Authorization") token: String): StorageStatus
+
+    /**
+     * "Play this" command sent from another of the same account's sessions (e.g. the phone's
+     * web_client), addressed at this device's own session token — checked from Home's existing
+     * idle-screen poll loop. Delivered (not "confirmed playing," just handed off) the moment
+     * this returns a non-null command; there is no ack channel back to the sender.
+     */
+    @GET("/api/remote/pending")
+    suspend fun getPendingRemoteCommand(@Header("Authorization") token: String): PendingCommandResponse
 }

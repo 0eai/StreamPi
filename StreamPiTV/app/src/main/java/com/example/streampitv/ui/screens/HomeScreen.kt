@@ -36,6 +36,7 @@ import com.example.streampitv.ui.components.NavTab
 import com.example.streampitv.ui.components.PosterCard
 import com.example.streampitv.ui.components.ServerStatsBar
 import com.example.streampitv.util.catching
+import com.example.streampitv.util.pollWithBackoff
 import com.example.streampitv.util.isNasOffline
 import com.example.streampitv.util.nasOfflineNotice
 import kotlinx.coroutines.delay
@@ -102,10 +103,8 @@ fun HomeScreen(
     // means offering to play something the server will refuse. A failed tick keeps the last
     // known answer — same reasoning as ServerStatsBar.
     LaunchedEffect(serverUrl, token) {
-        while (true) {
-            catching { api.nasAvailability(bearer) }
-                .onSuccess { state.availableNasNodes = it.available.toSet() }
-            delay(10_000)
+        pollWithBackoff(baseMs = 10_000) {
+            state.availableNasNodes = api.nasAvailability(bearer).available.toSet()
         }
     }
 
@@ -127,24 +126,6 @@ fun HomeScreen(
             return
         }
         onPlayVideo(v)
-    }
-
-    // Lets another of this account's sessions (e.g. the phone's web_client) tell this TV to
-    // start playing something — a lightweight polled command, same idle-screen cadence as the
-    // NAS-availability check above, since this app has no push/WebSocket channel to be told
-    // immediately. Only path/startTime travel over the wire; every other VideoItem field is
-    // optional and gets filled in once the player's own metadata fetch runs, same as it does
-    // for a normal tap in this same list.
-    LaunchedEffect(serverUrl, token) {
-        while (true) {
-            catching { api.getPendingRemoteCommand(bearer) }
-                .onSuccess { resp ->
-                    resp.command?.let { cmd ->
-                        playVideo(VideoItem(title = null, filename = null, path = cmd.path, poster = null, progress = cmd.startTime))
-                    }
-                }
-            delay(5_000)
-        }
     }
 
     /**

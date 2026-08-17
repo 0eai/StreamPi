@@ -27,6 +27,7 @@ import com.example.streampitv.data.ApiClient
 import com.example.streampitv.data.KunjiCodeRequest
 import com.example.streampitv.data.KunjiConfig
 import com.example.streampitv.data.KunjiFinalizeRequest
+import com.example.streampitv.util.DeviceInfo
 import com.example.streampitv.data.KunjiPayload
 import com.example.streampitv.data.KunjiSession
 import com.example.streampitv.data.KunjiSessionRequest
@@ -144,7 +145,18 @@ fun LoginScreen(
             val sub = status?.sub
             if (status?.status == "approved" && !sub.isNullOrBlank()) {
                 phase = KunjiPhase.SIGNING_IN
-                catching { api.kunjiFinalize(KunjiFinalizeRequest(s.sessionId, sub)) }
+                // Without these the server stores 'Unknown Device'/'Web Browser' and this TV
+                // appears in another device's cast picker as an unnamed desktop.
+                catching {
+                    api.kunjiFinalize(
+                        KunjiFinalizeRequest(
+                            s.sessionId,
+                            sub,
+                            device = DeviceInfo.name,
+                            device_type = DeviceInfo.TYPE
+                        )
+                    )
+                }
                     .onSuccess { res ->
                         if (res.success && res.token.isNotBlank()) onLoginSuccess(res.token, res.username, res.role)
                         else {
@@ -442,8 +454,8 @@ private fun PasswordForm(
                     LoginRequest(
                         username = username,
                         password = password,
-                        device = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim(),
-                        device_type = "Android TV"
+                        device = DeviceInfo.name,
+                        device_type = DeviceInfo.TYPE
                     )
                 )
             }.onSuccess { response ->

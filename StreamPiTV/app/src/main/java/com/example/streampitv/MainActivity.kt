@@ -27,8 +27,11 @@ import com.example.streampitv.ui.screens.PlayerScreen
 import com.example.streampitv.ui.screens.ServerConfigScreen
 import com.example.streampitv.ui.screens.SeriesDetailScreen
 import com.example.streampitv.ui.screens.SettingsScreen
+import com.example.streampitv.data.sortedForDisplay
+import com.example.streampitv.data.toVideoItem
 import com.example.streampitv.util.SessionExpiry
 import com.example.streampitv.util.catching
+import com.example.streampitv.util.pollWithBackoff
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -109,6 +112,45 @@ fun StreamPiApp(context: Context) {
             Log.w("StreamPi", "session rejected by server, signing out")
             clearSession(callLogout = false)
             loginNotice = "Your session expired. Please sign in again."
+        }
+    }
+
+    /**
+     * The receiver half of the web client's "Play on…".
+     *
+     * Lives here rather than in HomeScreen for the same reason homeState does: the if/else below
+     * removes whichever screen is not showing, so a poll owned by Home only ever caught a cast
+     * while the TV happened to be sitting on Home — not from Settings, a series page, or right
+     * after playback ended.
+     *
+     * Keyed on `activeVideo == null` rather than on activeVideo itself. It must not run during
+     * playback — the server marks a command delivered the moment it is read, so a tick mid-film
+     * would consume and silently discard a command nobody acts on — while an autoplay item swap
+     * must not restart the loop. A Boolean key gives both.
+     *
+     * The session token is required, not the player's short-lived stream token: the server
+     * matches this against sessions.token, so a stream token authenticates fine and then never
+     * matches, leaving the poll returning {command:null} forever with nothing to show why.
+     */
+    LaunchedEffect(serverUrl, token, activeVideo == null) {
+        val url = serverUrl ?: return@LaunchedEffect
+        val sessionToken = token ?: return@LaunchedEffect
+        if (activeVideo != null) return@LaunchedEffect
+
+        val api = ApiClient.of(url)
+        val bearer = "Bearer $sessionToken"
+        pollWithBackoff(baseMs = 5_000) {
+            val command = api.getPendingRemoteCommand(bearer).command ?: return@pollWithBackoff
+            // One refetch on a cache miss only. The sender could see this row, so a miss means
+            // this TV's cached library predates the file; storing it back refreshes Home too.
+            val hydrated = command.toVideoItem(homeState.library)
+                ?: command.toVideoItem(
+                    catching { api.getLibrary(bearer).sortedForDisplay() }
+                        .onSuccess { homeState.library = it }
+                        .getOrNull()
+                )
+                ?: return@pollWithBackoff
+            activeVideo = hydrated
         }
     }
 

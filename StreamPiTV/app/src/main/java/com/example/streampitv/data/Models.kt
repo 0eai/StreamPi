@@ -54,7 +54,20 @@ data class KunjiStatus(
 )
 
 /** POST /api/auth/kunji/finalize — returns the same body as a password login. */
-data class KunjiFinalizeRequest(val sessionId: String?, val sub: String)
+/**
+ * `device`/`device_type` are snake_case deliberately and must stay that way: the server
+ * destructures `device_type` from the body verbatim, and GET /api/auth/sessions derives the
+ * `deviceKind` the web cast picker keys its icon off from it. Renaming either to camelCase
+ * silently makes this TV show up as an unidentified desktop again, with nothing failing.
+ *
+ * Gson omits nulls, so omitting them sends exactly the body an older server already expects.
+ */
+data class KunjiFinalizeRequest(
+    val sessionId: String?,
+    val sub: String,
+    val device: String? = null,
+    val device_type: String? = null
+)
 
 /**
  * The short numeric code, for people who would rather type than scan. It comes from
@@ -136,8 +149,23 @@ data class TrackInfo(
         label?.takeIf { it.isNotBlank() } ?: language?.takeIf { it.isNotBlank() } ?: fallback
 }
 
+/**
+ * ffprobe's `format` section. Every field is individually nullable because the server answers
+ * `container: {}` when the probe fails (an unreachable NAS node, a parse error), and an older
+ * server omits the key altogether.
+ *
+ * Only `duration` is mapped for now: it is the fallback when a library row has no runtime of its
+ * own — a cast-launched item carries none at all. The rest of the payload the server sends
+ * (bitrate, encoder, creation time, video stream, attachments) is deliberately left unmapped
+ * until something on TV displays it.
+ */
+data class ContainerInfo(
+    val duration: Double? = null
+)
+
 data class MediaInfoResponse(
     val fileSize: Long = 0,
+    val container: ContainerInfo? = null,
     val audioTracks: List<TrackInfo> = emptyList(),
     val subtitleTracks: List<TrackInfo> = emptyList()
 )
@@ -211,3 +239,17 @@ data class StorageStatus(
     val used: Long = 0,
     val percentage: Double = 0.0
 )
+
+// ─── /api/remote/pending — "play on this device" commands from another session ─────────────
+data class PendingCommandResponse(val command: RemoteCommand? = null)
+
+/**
+ * A queued "play this" from another of the user's own sessions. Carries only a path and a resume
+ * position by design — the receiver builds normal playback from it and finds its own metadata.
+ *
+ * `path` is nullable despite the server always sending it: Gson populates fields by reflection
+ * and will happily leave a non-null-typed String null for a `{"command":{}}` body, which then
+ * NPEs deep inside URL building on a TV with nobody in front of it. RemotePlay.toVideoItem
+ * turns that into a skipped command instead.
+ */
+data class RemoteCommand(val path: String? = null, val startTime: Double = 0.0)
