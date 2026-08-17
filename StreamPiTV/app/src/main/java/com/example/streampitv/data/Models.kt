@@ -253,3 +253,54 @@ data class PendingCommandResponse(val command: RemoteCommand? = null)
  * turns that into a skipped command instead.
  */
 data class RemoteCommand(val path: String? = null, val startTime: Double = 0.0)
+
+// ─── /api/share — public, login-free links ─────────────────────────────────────────────────
+
+/**
+ * What a share link points at. A sealed type rather than two nullable fields because the TV,
+ * unlike the web client, never has to *infer* which it is: VideoItem always carries a path and
+ * SeriesItem never does, so the decision is a type the compiler can hold onto.
+ */
+sealed interface ShareTarget {
+    data class File(val path: String) : ShareTarget
+    data class Series(val seriesName: String) : ShareTarget
+}
+
+/**
+ * The two mutually exclusive bodies POST /api/share accepts. Gson omits nulls, so each branch
+ * serialises to exactly the two keys the server destructures.
+ */
+data class ShareRequest(
+    val shareType: String,
+    val path: String? = null,
+    val seriesName: String? = null
+) {
+    companion object {
+        fun of(target: ShareTarget): ShareRequest = when (target) {
+            is ShareTarget.File -> ShareRequest("file", path = target.path)
+            is ShareTarget.Series -> ShareRequest("series", seriesName = target.seriesName)
+        }
+    }
+}
+
+data class ShareResponse(
+    val success: Boolean = false,
+    /** A crypto.randomUUID(). Note the endpoint is NOT idempotent — each call mints another. */
+    val token: String? = null,
+    val error: String? = null
+)
+
+data class MyShare(
+    val token: String = "",
+    /** "file" or "series". */
+    val shareType: String? = null,
+    val title: String? = null,
+    val createdAt: String? = null,
+    val viewCount: Int = 0,
+    /** Null until the link's first view. */
+    val lastAccessedAt: String? = null
+) {
+    val isSeries: Boolean get() = shareType == "series"
+}
+
+data class MySharesResponse(val shares: List<MyShare> = emptyList())

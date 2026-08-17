@@ -27,11 +27,13 @@ import com.example.streampitv.data.ApiClient
 import com.example.streampitv.data.DeleteMediaRequest
 import com.example.streampitv.data.NasActionRequest
 import com.example.streampitv.data.SeriesItem
+import com.example.streampitv.data.ShareTarget
 import com.example.streampitv.data.VideoItem
 import com.example.streampitv.data.sortedForDisplay
 import com.example.streampitv.ui.components.BrandMark
 import com.example.streampitv.ui.components.FocusableItem
 import com.example.streampitv.ui.components.ItemActionsSheet
+import com.example.streampitv.ui.components.SharePanel
 import com.example.streampitv.ui.components.NavTab
 import com.example.streampitv.ui.components.PosterCard
 import com.example.streampitv.ui.components.ServerStatsBar
@@ -80,6 +82,9 @@ fun HomeScreen(
     // Distinguishes "still loading" from "the fetch failed and there is nothing to show".
     // Without it both rendered the same endless spinner.
     var loadFailed by remember { mutableStateOf(false) }
+    // Item whose share link is being created/shown. Separate from actionsFor so dismissing the
+    // sheet does not also close the panel it opened.
+    var shareFor by remember { mutableStateOf<VideoItem?>(null) }
 
     // Refetch on every entry: returning from the player means progress moved, so resume
     // bars and Continue Watching ordering are stale. The old library stays on screen while
@@ -325,7 +330,19 @@ fun HomeScreen(
                 isOnNas = target.isOnNas,
                 onNasAction = { runNasAction(target) },
                 onDelete = { deleteItem(target) },
+                // The server rejects vault files with a 403, so don't offer it.
+                onShare = if (target.is_private == 0) ({ shareFor = target }) else null,
                 onDismiss = { actionsFor = null }
+            )
+        }
+
+        shareFor?.let { target ->
+            SharePanel(
+                serverUrl = serverUrl,
+                token = token,
+                target = ShareTarget.File(target.path),
+                label = target.title ?: target.filename ?: target.path,
+                onDismiss = { shareFor = null }
             )
         }
 

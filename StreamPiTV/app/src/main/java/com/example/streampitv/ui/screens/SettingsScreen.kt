@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.QrCode
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material3.Icon
@@ -21,11 +22,17 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.streampitv.data.ApiClient
+import com.example.streampitv.data.MyShare
 import com.example.streampitv.data.MeResponse
 import com.example.streampitv.ui.components.BrandMark
 import com.example.streampitv.ui.components.FocusableItem
+import com.example.streampitv.ui.components.SharePanel
 import com.example.streampitv.util.catching
+import com.example.streampitv.util.formatIsoDate
 import com.example.streampitv.ui.theme.Tokens
+
+/** See the comment at the call site for why this is capped rather than scrolled. */
+private const val MAX_SHARE_ROWS = 6
 
 /**
  * Account and server details, reached from the gear on Home.
@@ -49,6 +56,11 @@ fun SettingsScreen(
     val api = remember(serverUrl) { ApiClient.of(serverUrl) }
     var me by remember { mutableStateOf<MeResponse?>(null) }
     var meUnavailable by remember { mutableStateOf(false) }
+    var shares by remember { mutableStateOf<List<MyShare>>(emptyList()) }
+    var sharesReloadKey by remember { mutableIntStateOf(0) }
+    // Link whose QR is being shown. Reuses SharePanel in its existing-link mode, which also
+    // avoids the temptation to mint a duplicate just to see the code again.
+    var showQrFor by remember { mutableStateOf<MyShare?>(null) }
     val backFocus = remember { FocusRequester() }
 
     LaunchedEffect(serverUrl, token) {
@@ -60,13 +72,20 @@ fun SettingsScreen(
             }
     }
 
+    LaunchedEffect(serverUrl, token, sharesReloadKey) {
+        catching { api.myShares("Bearer $token") }
+            .onSuccess { shares = it.shares }
+            .onFailure { Log.w("StreamPi", "/api/share/mine unavailable: ${it.message}") }
+    }
+
     LaunchedEffect(Unit) { runCatching { backFocus.requestFocus() } }
 
     val username = me?.username ?: storedUsername
     val role = me?.role ?: storedRole
 
+    Box(Modifier.fillMaxSize().background(Tokens.bg)) {
     Column(
-        modifier = Modifier.fillMaxSize().background(Tokens.bg).padding(40.dp)
+        modifier = Modifier.fillMaxSize().padding(40.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             FocusableItem(
@@ -114,6 +133,66 @@ fun SettingsScreen(
             }
         }
 
+        // My Shares. Hidden entirely when the endpoint is unavailable (an older server 404s it),
+        // matching how the Account card degrades when /api/auth/me is missing.
+        if (shares.isNotEmpty()) {
+            Spacer(Modifier.height(28.dp))
+            Card("My Shares") {
+                Text(
+                    "Anyone with one of these links can watch without signing in.",
+                    color = Tokens.muted,
+                    fontSize = 13.sp
+                )
+                Spacer(Modifier.height(14.dp))
+                // Capped rather than scrolled: this card sits inside a non-scrolling Column, and
+                // the point of it on a TV is reaching a link you made recently, not auditing all
+                // of them. The web client's Settings tab is the place for a full list.
+                shares.take(MAX_SHARE_ROWS).forEach { share ->
+                    FocusableItem(
+                        onClick = { showQrFor = share },
+                        modifier = Modifier.fillMaxWidth().height(56.dp)
+                    ) { focused ->
+                        Row(
+                            Modifier.fillMaxSize()
+                                .background(if (focused) Tokens.border else Tokens.surface2)
+                                .padding(horizontal = 16.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    share.title ?: "(untitled)",
+                                    color = Color.White,
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    maxLines = 1
+                                )
+                                val meta = buildList {
+                                    add(if (share.isSeries) "Series" else "File")
+                                    formatIsoDate(share.createdAt)?.let { add(it) }
+                                    if (share.viewCount > 0) add("${share.viewCount} views")
+                                }
+                                Text(meta.joinToString(" · "), color = Tokens.muted, fontSize = 12.sp)
+                            }
+                            Icon(
+                                Icons.Default.QrCode,
+                                contentDescription = null,
+                                tint = if (focused) Color.White else Tokens.muted2,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                }
+                if (shares.size > MAX_SHARE_ROWS) {
+                    Text(
+                        "Showing ${MAX_SHARE_ROWS} of ${shares.size} — manage the rest from the web app.",
+                        color = Tokens.muted2,
+                        fontSize = 12.sp
+                    )
+                }
+            }
+        }
+
         Spacer(Modifier.weight(1f))
 
         // Quiet until focused, per the design system's rule for destructive actions — on a
@@ -130,6 +209,20 @@ fun SettingsScreen(
                 Spacer(Modifier.width(10.dp))
                 Text("Sign out", color = fg, fontSize = 17.sp, fontWeight = FontWeight.Bold)
             }
+        }
+    }
+
+        showQrFor?.let { share ->
+            SharePanel(
+                serverUrl = serverUrl,
+                token = token,
+                // Null target: this link already exists, so the panel must never mint another.
+                target = null,
+                label = share.title ?: "Shared link",
+                existingToken = share.token,
+                onDismiss = { showQrFor = null },
+                onRevoked = { sharesReloadKey++ }
+            )
         }
     }
 }

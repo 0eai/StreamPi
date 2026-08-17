@@ -90,6 +90,31 @@ interface ApiService {
     @GET("/api/auth/me")
     suspend fun me(@Header("Authorization") token: String): MeResponse
 
+    // ─── Share links ────────────────────────────────────────────────────────
+    /**
+     * Mints a public, unauthenticated link to one file or a whole series.
+     *
+     * NOT idempotent: every call creates another live token, so this must never be fired from a
+     * panel-open effect. 403 when the target is a private-vault file, 404 when the path or
+     * series is unknown (or when every episode of the series is private).
+     */
+    @POST("/api/share")
+    suspend fun createShare(
+        @Header("Authorization") token: String,
+        @Body request: ShareRequest
+    ): ShareResponse
+
+    /** This account's live (non-revoked) links, newest first. 404s on older servers. */
+    @GET("/api/share/mine")
+    suspend fun myShares(@Header("Authorization") token: String): MySharesResponse
+
+    /** Soft revoke: the row survives but drops out of /api/share/mine and stops resolving. */
+    @DELETE("/api/share/{token}")
+    suspend fun revokeShare(
+        @Header("Authorization") authorization: String,
+        @Path("token") shareToken: String
+    ): OkResponse
+
     /**
      * Permanent: unlinks the file and its poster from disk. The server allows it when the
      * caller is super_admin, owns the file, or the file is public.

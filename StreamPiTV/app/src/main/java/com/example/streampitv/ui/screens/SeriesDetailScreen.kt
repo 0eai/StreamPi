@@ -11,6 +11,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
@@ -24,9 +25,11 @@ import com.example.streampitv.data.ApiClient
 import com.example.streampitv.data.DeleteMediaRequest
 import com.example.streampitv.data.NasActionRequest
 import com.example.streampitv.data.SeriesItem
+import com.example.streampitv.data.ShareTarget
 import com.example.streampitv.data.VideoItem
 import com.example.streampitv.ui.components.FocusableItem
 import com.example.streampitv.ui.components.ItemActionsSheet
+import com.example.streampitv.ui.components.SharePanel
 import com.example.streampitv.ui.components.PosterCard
 import com.example.streampitv.util.catching
 import com.example.streampitv.util.isNasOffline
@@ -57,6 +60,9 @@ fun SeriesDetailScreen(
     var nasNotice by remember { mutableStateOf<String?>(null) }
     var actionsFor by remember { mutableStateOf<VideoItem?>(null) }
     var confirmSeriesDelete by remember { mutableStateOf(false) }
+    // Target plus the label to show for it, so one panel serves both a single episode and the
+    // whole series without SharePanel having to know which it is.
+    var shareFor by remember { mutableStateOf<Pair<ShareTarget, String>?>(null) }
     // Same live poll as Home: an episode list can sit open while its node goes down.
     var availableNasNodes by remember(serverUrl, token) { mutableStateOf<Set<String>?>(null) }
 
@@ -183,6 +189,29 @@ fun SeriesDetailScreen(
                     Text(series.title, color = Color.White, fontSize = 32.sp, fontWeight = FontWeight.Bold)
                     Text("${episodes.size} Episodes", color = Color.Gray, fontSize = 16.sp)
                 }
+                // Whole-show actions live on this header rather than on Home's series cards,
+                // which deliberately have no options menu ("a series card stands for a show,
+                // not a file"). Hidden when every episode is in the private vault, since the
+                // server shares only the public ones and 404s when there are none.
+                if (episodes.any { it.is_private == 0 }) {
+                    FocusableItem(
+                        onClick = { shareFor = ShareTarget.Series(series.title) to series.title },
+                        modifier = Modifier.height(44.dp).width(180.dp)
+                    ) { focused ->
+                        Row(
+                            Modifier.fillMaxSize()
+                                .background(if (focused) Tokens.accent else Tokens.surface2),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            val fg = if (focused) Tokens.onAccent else Tokens.text
+                            Icon(Icons.Default.Share, contentDescription = null, tint = fg, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("Share series", color = fg, fontSize = 15.sp)
+                        }
+                    }
+                    Spacer(Modifier.width(12.dp))
+                }
                 FocusableItem(
                     onClick = { confirmSeriesDelete = true },
                     modifier = Modifier.height(44.dp).width(190.dp)
@@ -229,6 +258,8 @@ fun SeriesDetailScreen(
                 isOnNas = target.isOnNas,
                 onNasAction = { runNasAction(target) },
                 onDelete = { deleteEpisode(target) },
+                // The server rejects vault files with a 403, so don't offer it.
+                onShare = if (target.is_private == 0) ({ shareFor = ShareTarget.File(target.path) to (target.title ?: target.filename ?: target.path) }) else null,
                 onDismiss = { actionsFor = null }
             )
         }
@@ -244,6 +275,16 @@ fun SeriesDetailScreen(
                     "disk, along with their posters and watch history. This cannot be undone. " +
                     "Episodes you do not own are skipped.",
                 showNasRow = false
+            )
+        }
+
+        shareFor?.let { (target, label) ->
+            SharePanel(
+                serverUrl = serverUrl,
+                token = token,
+                target = target,
+                label = label,
+                onDismiss = { shareFor = null }
             )
         }
 
