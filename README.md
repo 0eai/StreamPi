@@ -180,7 +180,7 @@ npm install
 cp .env.example .env            # then fill in — see Configuration above
 # place your Firebase Admin key at server/service-account.json
 node gen_session.js             # interactive Telegram login → prints TG_SESSION
-npm start                       # or: pm2 start server.js --name streampi
+npm start                       # foreground — see Operations for running it under pm2
 ```
 
 Serves HTTP on `PORT` (3005) and, when
@@ -196,10 +196,20 @@ npm install
 cp node_config.json.example node_config.json
 ```
 
-Create the node in the admin dashboard first — it issues the `id` and `apiKey` to paste in. Pick
-roles per machine: `["nas"]` for a box with disks, `["transcoder"]` for one with CPU to spare,
-both if it has both. Then `npm start`. [scripts/build-worker-dist.sh](scripts/build-worker-dist.sh)
-packages a distributable copy with the template config, never the live one.
+Create the node in the admin dashboard first — it issues the `id` and `apiKey` to paste in. Roles are
+set here, not there: `["nas"]` for a box with disks, `["transcoder"]` for one with CPU to spare, both
+if it has both. The node refuses to boot without at least one, and what it reports here is what the
+server dispatches on. Then `npm start`, or put it under pm2 as below.
+
+Ownership is separate from creation, and is what lets a non-admin manage their own machine. Open the
+node's own dashboard on its `port` and sign in with your StreamPi account: if that account isn't the
+node's owner it asks for the `apiKey`, which claims an unowned node and otherwise reports who holds it.
+Admins bypass the check entirely, so they never see that screen. An admin can also assign or clear the
+owner from web Settings → Nodes — note that clearing alone doesn't revoke access, since a past owner
+keeps a copy of the key, which is why that dialog offers to regenerate it too.
+
+[scripts/build-worker-dist.sh](scripts/build-worker-dist.sh) packages a distributable copy with the
+template config, never the live one.
 
 ### Web client
 
@@ -236,7 +246,7 @@ Signing config comes from `keystore.properties` / a `.jks` file, both gitignored
 ## Tests
 
 ```bash
-cd server     && npm test     # vitest — nasSource, nodeProxy, transcodeQueue
+cd server     && npm test     # vitest — nasSource, nodeClaim, nodeProxy, transcodeQueue
 cd node       && npm test     # vitest — concurrencyGate, migration, retry, storage
 cd web_client && npm test     # vitest — components + utils
 cd StreamPiTV && ./gradlew test
@@ -244,12 +254,32 @@ cd StreamPiTV && ./gradlew test
 
 ## Operations
 
+Both the server and each companion node are long-running processes, so both belong under pm2. Set up
+once per machine — `pm2 startup` installs the boot hook, and `pm2 save` writes the process list that
+hook replays, so skipping the save means nothing comes back after a reboot:
+
 ```bash
-pm2 logs streampi        # tail server logs
-pm2 restart streampi
-pm2 stop streampi
-pm2 delete streampi && pm2 save    # remove from startup
+pm2 startup                                              # once per machine; prints a root command to run
+cd server && pm2 start server.js --name streampi      && pm2 save
+cd node   && pm2 start index.js  --name streampi-node && pm2 save
 ```
+
+A node runs on whichever machine hosts it, so it registers with that machine's pm2. On a single-box
+setup that is the same pm2 as the server's and `pm2 list` shows both; on a separate box, the node's
+commands run there.
+
+```bash
+pm2 list                            # what is managed here, and whether it is up
+pm2 logs streampi                   # tail server logs   (streampi-node for a node)
+pm2 restart streampi                # or: pm2 restart streampi-node
+pm2 stop streampi
+pm2 delete streampi && pm2 save     # remove from startup
+```
+
+**Restart a node with `pm2 restart streampi-node`, not the dashboard's own Save & Restart button.**
+That button spawns a detached replacement and exits ([node/routes/core.js](node/routes/core.js)), and
+pm2 reads the exit as a crash worth restarting — leaving two processes contending for port 4500, one
+of them dying on `EADDRINUSE`. The button exists for a node started by hand with `npm start`.
 
 The server installs `unhandledRejection` / `uncaughtException` handlers on purpose: Node's
 default is to kill the process, which would drop every connected viewer's stream over a bug three
