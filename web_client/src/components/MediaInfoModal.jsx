@@ -1,6 +1,7 @@
 import React from 'react';
-import { Loader2, Film, Volume2, Subtitles, Image, Info } from 'lucide-react';
+import { Loader2, Film, Volume2, Subtitles, Image, Info, Pencil, Download } from 'lucide-react';
 import Modal from './ui/Modal';
+import Button from './ui/Button';
 import { formatBytes, formatDuration } from '../utils/format';
 
 const Row = ({ label, value }) => {
@@ -24,7 +25,12 @@ const Section = ({ icon, title, children }) => (
 // per-stream instead of collapsed into the handful of fields Poster.jsx's hover badges use —
 // same source data, deeper view. metadata/loading are lifted from Poster.jsx's own existing
 // hover-triggered fetch rather than this modal fetching a second time.
-const MediaInfoModal = ({ isOpen, onClose, item, metadata, loading }) => (
+//
+// Rename and download live here rather than on the poster's hover cluster, which had grown to seven
+// buttons. Both are actions you take deliberately about one item, which is exactly what this dialog
+// already is. Each renders only when its handler is passed, so callers decide what is on offer and
+// this stays presentational — EpisodeCard passes neither and gets no footer.
+const MediaInfoModal = ({ isOpen, onClose, item, metadata, loading, onRename, onDownload }) => (
     <Modal isOpen={isOpen} onClose={onClose} maxWidth="max-w-lg" panelClassName="max-h-[85vh] flex flex-col" title={<><Info className="w-5 h-5 text-blue-500" /> Media Info</>}>
         <div className="overflow-y-auto pr-1 space-y-4">
             <div>
@@ -93,6 +99,21 @@ const MediaInfoModal = ({ isOpen, onClose, item, metadata, loading }) => (
                 </>
             )}
         </div>
+
+        {(onRename || onDownload) && (
+            <div className="flex justify-end gap-2 pt-4 mt-4 border-t border-gray-800 shrink-0">
+                {onRename && (
+                    <Button variant="ghost" onClick={onRename}>
+                        <Pencil className="w-4 h-4" /> Rename
+                    </Button>
+                )}
+                {onDownload && (
+                    <Button variant="ghost" onClick={onDownload}>
+                        <Download className="w-4 h-4" /> Download
+                    </Button>
+                )}
+            </div>
+        )}
     </Modal>
 );
 

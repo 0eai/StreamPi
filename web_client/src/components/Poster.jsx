@@ -1,13 +1,17 @@
 import React, { useState, useRef } from 'react';
-import { Download, Play, Database, Lock, Unlock, X, Trash2, Loader2, Volume2, Clock3, CheckCircle2, HardDrive, Archive, RefreshCcw, Server, Subtitles, Pencil, WifiOff, Share2, Info, Cast } from 'lucide-react';
+import { Play, Database, Lock, Unlock, X, Trash2, Loader2, Volume2, Clock3, CheckCircle2, HardDrive, Archive, RefreshCcw, Server, Subtitles, WifiOff, Share2, Info, Cast } from 'lucide-react';
 import { formatDuration } from '../utils/format';
 import { apiFetch } from '../utils/api';
 import { isNasOffline, nasOfflineMessage } from '../utils/nas';
+import { useDialogs } from './ui/dialogs';
+import { useToast } from './ui/toast';
 import MediaInfoModal from './MediaInfoModal';
 
 const Poster = ({ item, onClick, onDelete, onEdit, onMove, onShare, onCast, onTogglePrivacy, progress, movePercent, serverUrl, token, availableNodeIds }) => {
 
     const nasOffline = isNasOffline(item, availableNodeIds);
+    const { confirm } = useDialogs();
+    const toast = useToast();
 
     const [metadata, setMetadata] = useState(null);
     const [isLoadingMeta, setIsLoadingMeta] = useState(false);
@@ -62,8 +66,10 @@ const Poster = ({ item, onClick, onDelete, onEdit, onMove, onShare, onCast, onTo
     };
 
     const handleDownload = async (e) => {
-        e.stopPropagation(); 
-        if (!confirm(`Download "${item.title || item.filename}"?`)) return;
+        // Optional now: this used to be a button inside the clickable card, and is reached from the
+        // info dialog instead, where there is no parent click to stop.
+        e?.stopPropagation();
+        if (!await confirm(`Download "${item.title || item.filename}"?`)) return;
         try {
             const link = document.createElement("a");
             link.href = `${serverUrl}/api/download?path=${encodeURIComponent(item.path)}&token=${token}`;
@@ -71,7 +77,7 @@ const Poster = ({ item, onClick, onDelete, onEdit, onMove, onShare, onCast, onTo
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
-        } catch (err) { alert("Download failed"); }
+        } catch (err) { toast.error(`Download failed: ${err.message}`); }
     };
 
     const handleClick = (e) => {
@@ -80,7 +86,7 @@ const Poster = ({ item, onClick, onDelete, onEdit, onMove, onShare, onCast, onTo
         // request is a worse way to learn that. Restore is no help either — it reads from the
         // same node — so there is nothing to offer but the explanation.
         if (nasOffline) {
-            alert(nasOfflineMessage(item));
+            toast.error(nasOfflineMessage(item));
             return;
         }
         onClick(item);
@@ -276,15 +282,6 @@ const Poster = ({ item, onClick, onDelete, onEdit, onMove, onShare, onCast, onTo
                     <Info className="w-4 h-4" />
                 </button>
 
-                <button
-                    onClick={handleDownload}
-                    className="p-1.5 bg-black/60 rounded-full text-gray-400 hover:text-green-500 hover:bg-white transition-all"
-                    title="Download"
-                    aria-label="Download"
-                >
-                    <Download className="w-4 h-4" />
-                </button>
-
                 {onMove && (
                     <button 
                         onClick={(e) => { e.stopPropagation(); onMove(item); }}
@@ -321,16 +318,6 @@ const Poster = ({ item, onClick, onDelete, onEdit, onMove, onShare, onCast, onTo
                     </button>
                 )}
 
-                {onEdit && (
-                    <button
-                        onClick={(e) => { e.stopPropagation(); onEdit(item); }}
-                        className="p-1.5 bg-black/60 rounded-full text-gray-400 hover:text-blue-400 hover:bg-white transition-all"
-                        title="Rename"
-                        aria-label="Rename"
-                    >
-                        <Pencil className="w-4 h-4" />
-                    </button>
-                )}
 
                 {onDelete && (
                     <button
@@ -344,7 +331,17 @@ const Poster = ({ item, onClick, onDelete, onEdit, onMove, onShare, onCast, onTo
                 )}
             </div>
 
-            <MediaInfoModal isOpen={showInfoModal} onClose={() => setShowInfoModal(false)} item={item} metadata={metadata} loading={isLoadingMeta} />
+            {/* Rename and download moved off the hover cluster (seven buttons) and into this dialog,
+                which is already the "look at this one item properly" surface. */}
+            <MediaInfoModal
+                isOpen={showInfoModal}
+                onClose={() => setShowInfoModal(false)}
+                item={item}
+                metadata={metadata}
+                loading={isLoadingMeta}
+                onRename={onEdit && (() => { setShowInfoModal(false); onEdit(item); })}
+                onDownload={handleDownload}
+            />
         </div>
     );
 };
