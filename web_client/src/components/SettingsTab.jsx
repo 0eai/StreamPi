@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { User, Lock, KeyRound, Server, Plus, ExternalLink, Share2, Film, Tv, Trash2, Copy, Check } from 'lucide-react';
 import ActivityLog from './ActivityLog';
 import AddNodeModal from './AddNodeModal';
+import TransferNodeModal from './TransferNodeModal';
 import MyDevices from './MyDevices';
 import { useDialogs } from './ui/dialogs';
 import { useToast } from './ui/toast';
@@ -21,7 +22,7 @@ const isAdmin = (role) => role === 'admin' || role === 'super_admin';
 // way to reach change-password/Kunji-link). Admins additionally get User Management, Nodes,
 // and Activity Log — previously all three lived inside DashboardTab.jsx.
 const SettingsTab = ({ token, serverUrl, username, role, onLogout }) => {
-    const { confirm, choose } = useDialogs();
+    const { confirm } = useDialogs();
     const toast = useToast();
     const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
     const [isKunjiModalOpen, setIsKunjiModalOpen] = useState(false);
@@ -32,6 +33,7 @@ const SettingsTab = ({ token, serverUrl, username, role, onLogout }) => {
     const [addNodeOpen, setAddNodeOpen] = useState(false);
     const [nodeCredentials, setNodeCredentials] = useState(null);
     const [selectedNode, setSelectedNode] = useState(null);
+    const [transferNode, setTransferNode] = useState(null);
 
     const [shares, setShares] = useState([]);
     const [copiedShareToken, setCopiedShareToken] = useState(null);
@@ -135,50 +137,44 @@ const SettingsTab = ({ token, serverUrl, username, role, onLogout }) => {
         }
     };
 
-    const handleSetOwner = async (node, ownerUserId) => {
-        const clearingAnExistingOwner = !ownerUserId && node.ownerUserId;
+    const handleTransferNode = async (ownerUserId) => {
+        const node = transferNode;
+        try {
+            await setOwner(node, ownerUserId);
+            setTransferNode(null);
+        } catch (e) { toast.error("Transfer failed: " + e.message); }
+    };
 
-        // Clearing an owner does NOT revoke their access, which is the part that isn't obvious:
-        // /api/node-owner/:id/config proxies the node's own config payload, and that includes the raw
-        // apiKey — so a past owner keeps a copy and can re-claim the moment the node is unowned.
-        // Regenerating is what actually locks them out, so it's offered here rather than left as a
-        // second thing the admin has to know to do.
-        let alsoRegenerate = false;
-        if (clearingAnExistingOwner) {
-            const choice = await choose({
-                title: "Clear this node's owner?",
-                message: `${node.ownerUsername || 'The current owner'} keeps a copy of this node's API key, so they can claim it again. Regenerating the key is what revokes their access.`,
-                danger: true,
-                options: [
-                    { label: 'Clear + Regenerate Key', value: 'clear+regenerate' },
-                    { label: 'Clear Only', value: 'clear', variant: 'ghost' },
-                ],
-            });
-            if (!choice) return;
-            alsoRegenerate = choice === 'clear+regenerate';
-        }
+    const handleReleaseNode = async ({ regenerate }) => {
+        const node = transferNode;
+        if (regenerate && !await confirm({
+            title: 'Release and regenerate the key?',
+            message: `The old key stops working immediately, so "${node.name}" cannot register again until the new key is in its node_config.json.`,
+            confirmLabel: 'Release + Regenerate',
+            danger: true,
+        })) return;
 
         try {
-            await setOwner(node, ownerUserId ? Number(ownerUserId) : null);
+            await setOwner(node, null);
         } catch (e) {
-            toast.error("Set owner failed: " + e.message);
+            toast.error("Release failed: " + e.message);
             return;
         }
+        setTransferNode(null);
+        if (!regenerate) return;
 
-        if (!alsoRegenerate) return;
-
-        // Second leg. If it fails the first already succeeded, so say exactly that rather than a bare
-        // "failed" — the node is now unowned with a key the previous owner still holds.
+        // Second leg. The release already succeeded, so a failure here has to say so precisely: the
+        // node is now unowned with a key its previous owner still holds, which is a claimable state.
         try {
             const res = await apiFetch(serverUrl, `/api/admin/nodes/${node.id}/regenerate`, token, { method: 'POST' });
             const result = await parseJsonSafe(res);
             if (!res.ok) {
-                toast.error(`Owner cleared, but the key was NOT regenerated (${result.error || res.statusText}) — the previous owner can still claim it. Use Regenerate to finish.`);
+                toast.error(`Released, but the key was NOT regenerated (${result.error || res.statusText}) — the previous owner can still claim it. Use Regenerate to finish.`);
                 return;
             }
             setNodeCredentials(result);
         } catch (e) {
-            toast.error(`Owner cleared, but the key was NOT regenerated (${e.message}) — the previous owner can still claim it. Use Regenerate to finish.`);
+            toast.error(`Released, but the key was NOT regenerated (${e.message}) — the previous owner can still claim it. Use Regenerate to finish.`);
         }
     };
 
@@ -352,17 +348,14 @@ const SettingsTab = ({ token, serverUrl, username, role, onLogout }) => {
                                                         <span className="text-green-500 font-bold uppercase">Idle</span>
                                                     ) : <span className="text-gray-600">—</span>}
                                                 </td>
-                                                <td className="px-6 py-3" onClick={(e) => e.stopPropagation()}>
-                                                    <select
-                                                        value={n.ownerUserId || ''}
-                                                        onChange={(e) => handleSetOwner(n, e.target.value)}
-                                                        className="bg-gray-800 border border-gray-700 text-gray-300 text-xs rounded px-2 py-1 max-w-[140px]"
-                                                    >
-                                                        <option value="">— None —</option>
-                                                        {ownerCandidates.map(u => (
-                                                            <option key={u.id} value={u.id}>{u.username}</option>
-                                                        ))}
-                                                    </select>
+                                                {/* Read-only. Assignment moved to the Transfer action, because a
+                                                    dropdown here changed who could administer a machine on a stray
+                                                    scroll, and it listed every user as though ownership meant the same
+                                                    for all of them — admins bypass the check, so it doesn't. */}
+                                                <td className="px-6 py-3 text-xs">
+                                                    {n.ownerUsername
+                                                        ? <span className="text-gray-300">{n.ownerUsername}</span>
+                                                        : <span className="text-gray-600">—</span>}
                                                 </td>
                                                 <td className="px-6 py-3 text-right" onClick={(e) => e.stopPropagation()}>
                                                     {n.dashboardUrl && /^https?:\/\//i.test(n.dashboardUrl) && (
@@ -370,6 +363,7 @@ const SettingsTab = ({ token, serverUrl, username, role, onLogout }) => {
                                                             <ExternalLink className="w-3 h-3" /> Open
                                                         </a>
                                                     )}
+                                                    <button onClick={() => setTransferNode(n)} className="text-xs text-green-500 hover:text-green-400 font-medium mr-3">Transfer</button>
                                                     <button onClick={() => handleRegenerateNode(n)} className="text-xs text-yellow-500 hover:text-yellow-400 font-medium mr-3">Regenerate</button>
                                                     <button onClick={() => handleRemoveNode(n)} className="text-xs text-red-500 hover:text-red-400 font-medium">Remove</button>
                                                 </td>
@@ -382,6 +376,14 @@ const SettingsTab = ({ token, serverUrl, username, role, onLogout }) => {
                     </div>
 
                     <ActivityLog token={token} serverUrl={serverUrl} />
+
+                    <TransferNodeModal
+                        node={transferNode}
+                        users={ownerCandidates}
+                        onClose={() => setTransferNode(null)}
+                        onTransfer={handleTransferNode}
+                        onRelease={handleReleaseNode}
+                    />
 
                     <AddNodeModal
                         isOpen={addNodeOpen}

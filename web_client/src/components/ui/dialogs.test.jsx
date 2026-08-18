@@ -125,69 +125,16 @@ describe('prompt', () => {
     });
 });
 
-describe('choose', () => {
-    const spec = {
-        title: "Clear this node's owner?",
-        message: 'ranjan keeps a copy of the key.',
-        options: [
-            { label: 'Clear + Regenerate Key', value: 'clear+regenerate' },
-            { label: 'Clear Only', value: 'clear', variant: 'ghost' },
-        ],
-    };
-
-    it('resolves the chosen option value', async () => {
-        const get = renderDialogs();
-        let promise;
-        act(() => { promise = get().choose(spec); });
-
-        expect(await screen.findByText("Clear this node's owner?")).toBeInTheDocument();
-        expect(screen.getByText('ranjan keeps a copy of the key.')).toBeInTheDocument();
-        fireEvent.click(screen.getByText('Clear + Regenerate Key'));
-        await expect(promise).resolves.toBe('clear+regenerate');
-    });
-
-    it('distinguishes the second option from the first', async () => {
-        // The whole point of choose over confirm: these are different outcomes, not yes-and-no.
-        const get = renderDialogs();
-        let promise;
-        act(() => { promise = get().choose(spec); });
-        fireEvent.click(await screen.findByText('Clear Only'));
-        await expect(promise).resolves.toBe('clear');
-    });
-
-    it('resolves null on Cancel and on Escape, so callers can bail on a falsy check', async () => {
-        const get = renderDialogs();
-        let promise;
-        act(() => { promise = get().choose(spec); });
-        fireEvent.click(await screen.findByText('Cancel'));
-        await expect(promise).resolves.toBeNull();
-
-        act(() => { promise = get().choose(spec); });
-        await screen.findByText("Clear this node's owner?");
-        fireEvent.keyDown(document, { key: 'Escape' });
-        await expect(promise).resolves.toBeNull();
-    });
-
-    it('resolves a superseded choose as null, not false', async () => {
-        // The cancel value has to come from the pending dialog's own kind. Reading it off the
-        // incoming spec gave a superseded choose `false`, which is falsy but the wrong type.
+describe('supersession', () => {
+    it('resolves a superseded prompt as null, not false', async () => {
+        // The cancel value has to come from the pending dialog's own kind, not the incoming one.
+        // Both are falsy so nothing visibly broke, but a caller checking `=== null` would have been
+        // silently wrong.
         const get = renderDialogs();
         let first;
-        act(() => { first = get().choose(spec); });
+        act(() => { first = get().prompt({ label: 'Title', value: 'Old' }); });
         act(() => { get().confirm('Something else?'); });
         await expect(first).resolves.toBeNull();
-    });
-
-    it('focuses none of the actions, so a stray Enter picks nothing', async () => {
-        // Modal focuses the first focusable in the panel, which is its header close button — so Enter
-        // on open dismisses. What matters is that it is never one of the options.
-        const get = renderDialogs();
-        act(() => { get().choose(spec); });
-        await screen.findByText("Clear this node's owner?");
-
-        for (const label of ['Cancel', 'Clear Only', 'Clear + Regenerate Key']) {
-            expect(screen.getByText(label)).not.toHaveFocus();
-        }
     });
 });
 
