@@ -21,6 +21,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.streampitv.data.ApiClient
@@ -198,8 +199,20 @@ fun SeriesDetailScreen(
                 }
                 Spacer(modifier = Modifier.width(20.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(series.title, color = Color.White, fontSize = 32.sp, fontWeight = FontWeight.Bold)
-                    Text("${state.episodes.size} Episodes", color = Color.Gray, fontSize = 16.sp)
+                    // 24sp on one line rather than 32sp wrapping onto two: "Declassified
+                    // Operation Sindoor" is an ordinary length for a show and it already wrapped,
+                    // which pushed the episode count into the grid and left the row lopsided.
+                    // The buttons beside it shed their redundant "series" word to give this
+                    // column back the width.
+                    Text(
+                        series.title,
+                        color = Color.White,
+                        fontSize = 24.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text("${state.episodes.size} Episodes", color = Color.Gray, fontSize = 14.sp)
                 }
                 // Whole-show actions live on this header rather than on Home's series cards,
                 // which deliberately have no options menu ("a series card stands for a show,
@@ -208,7 +221,7 @@ fun SeriesDetailScreen(
                 if (state.episodes.any { it.is_private == 0 }) {
                     FocusableItem(
                         onClick = { shareFor = ShareTarget.Series(series.title) to series.title },
-                        modifier = Modifier.height(44.dp).width(180.dp)
+                        modifier = Modifier.height(44.dp).width(130.dp)
                     ) { focused ->
                         Row(
                             Modifier.fillMaxSize()
@@ -219,14 +232,14 @@ fun SeriesDetailScreen(
                             val fg = if (focused) Tokens.onAccent else Tokens.text
                             Icon(Icons.Default.Share, contentDescription = null, tint = fg, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.width(8.dp))
-                            Text("Share series", color = fg, fontSize = 15.sp)
+                            Text("Share", color = fg, fontSize = 15.sp)
                         }
                     }
                     Spacer(Modifier.width(12.dp))
                 }
                 FocusableItem(
                     onClick = { confirmSeriesDelete = true },
-                    modifier = Modifier.height(44.dp).width(190.dp)
+                    modifier = Modifier.height(44.dp).width(130.dp)
                 ) { focused ->
                     Row(
                         Modifier.fillMaxSize()
@@ -237,7 +250,7 @@ fun SeriesDetailScreen(
                         val fg = if (focused) Tokens.text else Tokens.dangerText
                         Icon(Icons.Default.Delete, contentDescription = null, tint = fg, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(8.dp))
-                        Text("Delete series", color = fg, fontSize = 15.sp)
+                        Text("Delete", color = fg, fontSize = 15.sp)
                     }
                 }
             }
