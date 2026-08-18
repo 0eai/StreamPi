@@ -4,6 +4,8 @@ import AppWrapper from './StreamApp'; // This is your existing App export
 import DownloadsPage from './components/DownloadsPage';
 import SharePlayerPage from './components/SharePlayerPage';
 import ErrorBoundary from './components/ErrorBoundary';
+import { ToastProvider } from './components/ui/toast';
+import { DialogProvider } from './components/ui/dialogs';
 // Imported directly (not via @import in index.css) so Vite resolves its relative
 // woff2 url()s itself, instead of Tailwind's PostCSS import-inlining losing that context.
 import '@fontsource-variable/archivo';
@@ -32,7 +34,14 @@ const shareToken = isSharePage ? decodeURIComponent(pathParts[1]) : null;
 root.render(
     <React.StrictMode>
         <ErrorBoundary label="StreamPi" onReset={() => window.location.reload()}>
-            {isDownloadsPage ? <DownloadsPage /> : isSharePage ? <SharePlayerPage token={shareToken} /> : <AppWrapper />}
+            {/* Inside the boundary, not around it: a crash in a page still has to be caught, and
+                the providers are what the page reaches for to report failures. Both wrap every
+                entry point, including the two unauthenticated pages. */}
+            <ToastProvider>
+                <DialogProvider>
+                    {isDownloadsPage ? <DownloadsPage /> : isSharePage ? <SharePlayerPage token={shareToken} /> : <AppWrapper />}
+                </DialogProvider>
+            </ToastProvider>
         </ErrorBoundary>
     </React.StrictMode>
 );
