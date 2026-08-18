@@ -4,7 +4,8 @@ import admin from 'firebase-admin';
 import { PRIVATE_ROOT } from '../paths.js';
 import { db, initDB, logActivity, getSetting, setSetting } from '../db.js';
 import { verifyToken } from '../middleware.js';
-import { generateApiKey, hashApiKey, generateNodeId } from '../cryptoHelpers.js';
+import { generateApiKey, hashApiKey, generateNodeId, sessionIdFor } from '../cryptoHelpers.js';
+import { deviceKindOf } from './auth.js';
 import { KNOWN_NODES, KNOWN_NAS_NODES, ACTIVE_STREAMS, JOB_PROGRESS } from '../state.js';
 import { proxyToNode } from '../nodeProxy.js';
 import { isFirebaseActive } from '../firebaseBootstrap.js';
@@ -297,6 +298,101 @@ router.post('/api/admin/users/action', verifyToken, async (req, res) => {
         await logActivity(req.user.username, "ADMIN_ACTION", `${action.toUpperCase()} user ${targetUser.username}`, req.ip);
         res.json({ success: true });
 
+    } catch (e) { sendServerError(res, e); }
+});
+
+/**
+ * Every session on the system — the "what has access to this server" list behind the Dashboard.
+ *
+ * super_admin only, matching GET /api/admin/activity below rather than the two-clause admin gate
+ * used by every other route in this file. This returns every user's IP and location and backs the
+ * ability to sign any of them out, which is a step beyond what plain admin gets elsewhere.
+ *
+ * Deliberately omits all three filters the other session queries apply, and each omission is the
+ * point rather than an oversight:
+ *  - no activity window. The dashboard's `last_active > now - 5min` is the same value as remote.js's
+ *    COMMAND_MAX_AGE_MS: it answers "can this still receive a cast", not "is this signed in". Session
+ *    tokens never expire (middleware.js only checks the row exists), so an idle row is still a live
+ *    credential and hiding it would defeat the purpose of the list.
+ *  - no `role != 'super_admin'`. Every other listing hides them, which would leave this screen unable
+ *    to show the viewer their own sessions or another owner's — a permanent blind spot on the one
+ *    view meant to remove one.
+ *  - no `device_type != 'Node'`. Excluding the node dashboard is right for a cast target; it is a
+ *    real standing credential here.
+ *
+ * Returns an opaque `id` and no `token`: see sessionIdFor. The user-facing /api/auth/devices makes
+ * the same choice, but it matters more here, since this payload would otherwise carry a working
+ * credential for every account on the server.
+ */
+router.get('/api/admin/devices', verifyToken, async (req, res) => {
+    if (req.user.role !== 'super_admin') return res.status(403).json({ error: "Access Denied" });
+
+    if (!db) await initDB();
+    try {
+        const currentToken = req.headers.authorization?.split('Bearer ')[1] || req.query.token;
+        const rows = await db.all(
+            `SELECT token, username, role, device, device_type, ip, location, last_active
+             FROM sessions ORDER BY last_active DESC`
+        );
+        // No LIMIT: the 72-hour sweep in routes/status.js bounds this in practice, and a truncated
+        // security list is worse than a long one. Revisit if a deployment ever has enough users for
+        // this to matter.
+        const devices = rows.map(s => ({
+            id: sessionIdFor(s.token),
+            username: s.username,
+            role: s.role,
+            device: s.device,
+            deviceType: s.device_type,
+            deviceKind: deviceKindOf(s),
+            ip: s.ip,
+            location: s.location,
+            lastActive: s.last_active,
+            isCurrent: s.token === currentToken,
+        }));
+        res.json({ devices });
+    } catch (e) { sendServerError(res, e); }
+});
+
+/**
+ * Sign out any one session on the system, by the opaque id from /api/admin/devices.
+ *
+ * Cannot reuse DELETE /api/auth/devices/:id: that route scans only the caller's own rows, so it 404s
+ * for anyone else's device. That is correct there — the username-scoped scan IS its ownership check —
+ * and loosening it would turn a user-facing route into an admin one. Here the scan is unscoped and
+ * the super_admin gate is the only check.
+ *
+ * Note the existing "Cannot modify the Super Admin." guard in /api/admin/users/action is deliberately
+ * NOT extended here: a super_admin can sign out another super_admin, including the owner. That was an
+ * explicit choice, on the grounds that a security list which cannot act on what it shows is not much
+ * of one; the client states whose session it is before asking.
+ *
+ * Inherited limitation: this does not stop playback already running. A stream token (state.js
+ * STREAM_TOKENS) has no back-reference to the session that minted it and middleware.js checks it
+ * before the sessions table, so a revoked device keeps what it started for up to the 6-hour TTL.
+ */
+router.delete('/api/admin/devices/:id', verifyToken, async (req, res) => {
+    if (req.user.role !== 'super_admin') return res.status(403).json({ error: "Access Denied" });
+
+    if (!db) await initDB();
+    try {
+        const rows = await db.all("SELECT token, username, device FROM sessions");
+        const match = rows.find(s => sessionIdFor(s.token) === req.params.id);
+        if (!match) return res.status(404).json({ error: "Device not found" });
+
+        await db.run("DELETE FROM sessions WHERE token = ?", match.token);
+        // Clipped because POST /api/auth/login stores `device` from the request body with no length
+        // limit, and this lands in the activity log verbatim.
+        const label = (match.device || 'Unknown Device').slice(0, 80);
+        // Names the OWNER, and uses its own action: req.user.username is the admin, so the
+        // user-facing SESSION_REVOKE line would read as though the owner signed themselves out.
+        await logActivity(
+            req.user.username,
+            "ADMIN_SESSION_REVOKE",
+            `Signed out ${label} belonging to ${match.username}`,
+            req.ip
+        );
+
+        res.json({ success: true });
     } catch (e) { sendServerError(res, e); }
 });
 

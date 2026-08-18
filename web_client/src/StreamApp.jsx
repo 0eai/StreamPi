@@ -225,7 +225,7 @@ export default function StreamApp() {
                             <Discovery token={token} serverUrl={SERVER_URL} library={library} />
                         )}
                         {activeTab === 'dashboard' && (
-                            <DashboardTab token={token} serverUrl={SERVER_URL} />
+                            <DashboardTab token={token} serverUrl={SERVER_URL} role={role} onLogout={handleLogout} />
                         )}
                         {activeTab === 'settings' && (
                             <SettingsTab token={token} serverUrl={SERVER_URL} username={username} role={role} onLogout={handleLogout} />

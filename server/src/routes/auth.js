@@ -24,8 +24,11 @@ const router = express.Router();
  *
  * 'server' covers the node dashboard's own login (node/public/app.js). /api/auth/sessions filters
  * those out as cast targets, but /api/auth/devices lists them, so the kind has to exist.
+ *
+ * Exported for routes/admin.js's all-users device list. If a third consumer appears this should move
+ * out of a routes file into its own module rather than being imported across routes again.
  */
-const deviceKindOf = ({ device, device_type }) => {
+export const deviceKindOf = ({ device, device_type }) => {
     if (device_type === 'Node') return 'server';
     if (device_type === 'TV' || device_type === 'Android TV' || /\btv\b/i.test(device || '')) return 'tv';
     if (device_type === 'Mobile') return 'mobile';

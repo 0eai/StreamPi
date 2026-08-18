@@ -1,10 +1,11 @@
 import React, { useState } from 'react';
 import { Smartphone, UploadCloud, Monitor, Tv, Loader2, HardDrive, Activity, Cpu, ArrowUp, ArrowDown, XCircle, Globe, Radio, Wifi, WifiOff } from 'lucide-react';
 import { formatDuration, formatBytes, formatNetworkSpeed, formatRelativeTime } from '../utils/format';
+import AllDevices from './AllDevices';
 import { usePolling } from '../utils/usePolling';
 import { apiFetch, parseJsonSafe } from '../utils/api';
 
-const DashboardTab = ({ token, serverUrl }) => {
+const DashboardTab = ({ token, serverUrl, role, onLogout }) => {
     const [data, setData] = useState(null);
     const [system, setSystem] = useState(null);
     const [storage, setStorage] = useState(null);
@@ -205,6 +206,17 @@ const DashboardTab = ({ token, serverUrl }) => {
                         </table>
                     </div>
                 </div>
+
+                {/* 2b. ALL DEVICES — super_admin only, and hidden outright rather than disabled for
+                    anyone else: a visible card advertising every user's devices is worse than its
+                    absence, and the route 403s regardless. This is the first place the client
+                    branches on super_admin for access rather than for a label or a colour.
+
+                    Separate from Online Users above on purpose — that card is a live "who is
+                    watching now" view whose 5-minute window is meaningful there. */}
+                {role === 'super_admin' && (
+                    <AllDevices token={token} serverUrl={serverUrl} onLogout={onLogout} />
+                )}
 
                 {/* 3. ACTIVE STREAMS */}
                 <div className="bg-[#1a1a1a] rounded-xl border border-gray-800 overflow-hidden">
