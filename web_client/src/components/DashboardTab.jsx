@@ -2,10 +2,14 @@ import React, { useState } from 'react';
 import { Smartphone, UploadCloud, Monitor, Tv, Loader2, HardDrive, Activity, Cpu, ArrowUp, ArrowDown, XCircle, Globe, Radio, Wifi, WifiOff } from 'lucide-react';
 import { formatDuration, formatBytes, formatNetworkSpeed, formatRelativeTime } from '../utils/format';
 import AllDevices from './AllDevices';
+import { useDialogs } from './ui/dialogs';
+import { useToast } from './ui/toast';
 import { usePolling } from '../utils/usePolling';
 import { apiFetch, parseJsonSafe } from '../utils/api';
 
 const DashboardTab = ({ token, serverUrl, role, onLogout }) => {
+    const { confirm } = useDialogs();
+    const toast = useToast();
     const [data, setData] = useState(null);
     const [system, setSystem] = useState(null);
     const [storage, setStorage] = useState(null);
@@ -36,9 +40,9 @@ const DashboardTab = ({ token, serverUrl, role, onLogout }) => {
             const res = await apiFetch(serverUrl, '/api/status/speedtest', token);
             const data = await res.json();
             if (res.ok) setSpeedTestResult(data);
-            else alert("Test Failed: " + (data.error || "Unknown error"));
+            else toast.error("Test failed: " + (data.error || "Unknown error"));
         } catch (e) {
-            alert("Connection Error");
+            toast.error("Connection error");
         }
         setIsTestingSpeed(false);
     };
@@ -47,16 +51,16 @@ const DashboardTab = ({ token, serverUrl, role, onLogout }) => {
     const toMbps = (bytesPerSec) => (bytesPerSec * 8 / 1000000).toFixed(1);
 
     const handleTerminateStream = async (streamId) => {
-        if (!confirm("Terminate this stream? Playback will stop immediately for that user.")) return;
+        if (!await confirm("Terminate this stream? Playback will stop immediately for that user.")) return;
         try {
             const res = await apiFetch(serverUrl, `/api/admin/streams/${streamId}/terminate`, token, { method: 'POST' });
             const result = await parseJsonSafe(res);
             if (!res.ok) {
-                alert(`Terminate failed: ${result.error || res.statusText}`);
+                toast.error(`Terminate failed: ${result.error || res.statusText}`);
                 return;
             }
             setData(prev => prev ? { ...prev, streams: prev.streams.filter(s => s.id !== streamId) } : prev);
-        } catch (e) { alert("Terminate failed: " + e.message); }
+        } catch (e) { toast.error("Terminate failed: " + e.message); }
     };
 
     if (!data || !system) return <div className="p-12 text-center text-gray-500"><Loader2 className="w-8 h-8 animate-spin mx-auto mb-2"/> Loading Dashboard...</div>;

@@ -3,8 +3,12 @@ import { Magnet, Play, Pause, Lock, Trash2, CheckCircle2, ArrowUp, ArrowDown, Cl
 import { formatBytes } from '../utils/format';
 import { usePolling } from '../utils/usePolling';
 import { apiFetch } from '../utils/api';
+import { useDialogs } from './ui/dialogs';
+import { useToast } from './ui/toast';
 
 const TorrentManager = ({ token, serverUrl }) => {
+    const { confirm } = useDialogs();
+    const toast = useToast();
     const [magnetLink, setMagnetLink] = useState('');
     const [torrents, setTorrents] = useState([]);
     const [loading, setLoading] = useState(false);
@@ -31,7 +35,7 @@ const TorrentManager = ({ token, serverUrl }) => {
             setMagnetLink('');
             setIsPrivate(false);
             setTrigger(t => t + 1);
-        } catch (e) { alert("Failed to add torrent"); }
+        } catch (e) { toast.error("Failed to add torrent: " + e.message); }
         setLoading(false);
     };
 
@@ -39,7 +43,12 @@ const TorrentManager = ({ token, serverUrl }) => {
         // action = 'pause' | 'resume' | 'remove' — every other destructive action in this app
         // (media delete, node remove, user delete, etc.) is guarded by a confirmation; this one
         // wasn't.
-        if (action === 'remove' && !confirm("Remove this torrent? This deletes its downloaded data.")) return;
+        if (action === 'remove' && !await confirm({
+            title: 'Remove this torrent?',
+            message: 'This deletes its downloaded data.',
+            confirmLabel: 'Remove',
+            danger: true,
+        })) return;
         await apiFetch(serverUrl, `/api/torrents/${hash}/${action}`, token, { method: 'POST' });
         setTrigger(t => t + 1);
     };

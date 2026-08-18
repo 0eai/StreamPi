@@ -3,6 +3,8 @@ import { User, Lock, KeyRound, Server, Plus, ExternalLink, Share2, Film, Tv, Tra
 import ActivityLog from './ActivityLog';
 import AddNodeModal from './AddNodeModal';
 import MyDevices from './MyDevices';
+import { useDialogs } from './ui/dialogs';
+import { useToast } from './ui/toast';
 import CredentialsModal from './CredentialsModal';
 import NodeDetailModal from './NodeDetailModal';
 import UserManagement from './UserManagement';
@@ -19,6 +21,8 @@ const isAdmin = (role) => role === 'admin' || role === 'super_admin';
 // way to reach change-password/Kunji-link). Admins additionally get User Management, Nodes,
 // and Activity Log — previously all three lived inside DashboardTab.jsx.
 const SettingsTab = ({ token, serverUrl, username, role, onLogout }) => {
+    const { confirm } = useDialogs();
+    const toast = useToast();
     const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
     const [isKunjiModalOpen, setIsKunjiModalOpen] = useState(false);
     const [kunjiLinked, setKunjiLinked] = useState(false);
@@ -47,20 +51,20 @@ const SettingsTab = ({ token, serverUrl, username, role, onLogout }) => {
     const handleCopyShareLink = (shareToken) => {
         copyToClipboard(`${window.location.origin}/share/${shareToken}`)
             .then(() => { setCopiedShareToken(shareToken); setTimeout(() => setCopiedShareToken(null), 1500); })
-            .catch(() => alert("Couldn't copy automatically — select the text and copy it manually."));
+            .catch(() => toast.error("Couldn't copy automatically — select the text and copy it manually."));
     };
 
     const handleRevokeShare = async (shareToken) => {
-        if (!confirm('Revoke this share link? Anyone using it will lose access immediately.')) return;
+        if (!await confirm('Revoke this share link? Anyone using it will lose access immediately.')) return;
         try {
             const res = await apiFetch(serverUrl, `/api/share/${shareToken}`, token, { method: 'DELETE' });
             if (!res.ok) {
                 const data = await parseJsonSafe(res);
-                alert(`Revoke failed: ${data.error || res.statusText}`);
+                toast.error(`Revoke failed: ${data.error || res.statusText}`);
                 return;
             }
             loadShares();
-        } catch (e) { alert("Revoke failed: " + e.message); }
+        } catch (e) { toast.error("Revoke failed: " + e.message); }
     };
 
     const refreshKunjiLinkStatus = async (t) => {
@@ -76,15 +80,15 @@ const SettingsTab = ({ token, serverUrl, username, role, onLogout }) => {
     }, [token]);
 
     const handleUnlinkKunji = async () => {
-        if (!confirm('Unlink your Kunji identity from this account? You can always link it again later.')) return;
+        if (!await confirm('Unlink your Kunji identity from this account? You can always link it again later.')) return;
         try {
             const res = await apiFetch(serverUrl, '/api/auth/kunji/unlink', token, { method: 'POST' });
             if (res.ok) setKunjiLinked(false);
             else {
                 const data = await parseJsonSafe(res);
-                alert('Unlink failed: ' + (data.error || res.statusText));
+                toast.error('Unlink failed: ' + (data.error || res.statusText));
             }
-        } catch (e) { alert('Unlink failed: ' + e.message); }
+        } catch (e) { toast.error('Unlink failed: ' + e.message); }
     };
 
     // Admin-only data — skipped entirely for a regular user rather than polling endpoints
@@ -103,32 +107,32 @@ const SettingsTab = ({ token, serverUrl, username, role, onLogout }) => {
     }, 2000, [token, serverUrl, role]);
 
     const handleRegenerateNode = async (node) => {
-        if (!confirm(`Regenerate the API key for "${node.name}"? The old key stops working immediately.`)) return;
+        if (!await confirm(`Regenerate the API key for "${node.name}"? The old key stops working immediately.`)) return;
         try {
             const res = await apiFetch(serverUrl, `/api/admin/nodes/${node.id}/regenerate`, token, { method: 'POST' });
             const result = await parseJsonSafe(res);
-            if (!res.ok) { alert(`Regenerate failed: ${result.error || res.statusText}`); return; }
+            if (!res.ok) { toast.error(`Regenerate failed: ${result.error || res.statusText}`); return; }
             setNodeCredentials(result);
-        } catch (e) { alert("Regenerate failed: " + e.message); }
+        } catch (e) { toast.error("Regenerate failed: " + e.message); }
     };
 
     const handleRemoveNode = async (node) => {
-        if (!confirm(`Remove node "${node.name}"? This cannot be undone.`)) return;
+        if (!await confirm(`Remove node "${node.name}"? This cannot be undone.`)) return;
         try {
             const res = await apiFetch(serverUrl, `/api/admin/nodes/${node.id}`, token, { method: 'DELETE' });
             if (!res.ok) {
                 const result = await parseJsonSafe(res);
-                alert(`Remove failed: ${result.error || res.statusText}`);
+                toast.error(`Remove failed: ${result.error || res.statusText}`);
             }
-        } catch (e) { alert("Remove failed: " + e.message); }
+        } catch (e) { toast.error("Remove failed: " + e.message); }
     };
 
     const handleSetOwner = async (node, ownerUserId) => {
         try {
             const res = await apiFetch(serverUrl, `/api/admin/nodes/${node.id}/owner`, token, { method: 'POST', json: { ownerUserId: ownerUserId ? Number(ownerUserId) : null } });
             const result = await parseJsonSafe(res);
-            if (!res.ok) alert(`Set owner failed: ${result.error || res.statusText}`);
-        } catch (e) { alert("Set owner failed: " + e.message); }
+            if (!res.ok) toast.error(`Set owner failed: ${result.error || res.statusText}`);
+        } catch (e) { toast.error("Set owner failed: " + e.message); }
     };
 
     return (

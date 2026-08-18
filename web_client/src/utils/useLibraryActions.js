@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
 import { apiFetch, parseJsonSafe } from './api';
 import { useNasTransferProgress } from './nas';
+import { useDialogs } from '../components/ui/dialogs';
+import { useToast } from '../components/ui/toast';
 
 const EMPTY_LIBRARY = { continueWatching: [], movies: [], series: [] };
 
@@ -24,6 +26,11 @@ const MOVE_GRACE_MS = 5000;
 // is called instead of directly handling logout, since that's session-level state this hook
 // has no business owning.
 export const useLibraryActions = (token, serverUrl, onUnauthorized) => {
+    // This is a hook, so it reaches the dialog/toast providers directly rather than having them
+    // threaded down through every component that calls one of these actions.
+    const { confirm, prompt } = useDialogs();
+    const toast = useToast();
+
     const [library, setLibrary] = useState(EMPTY_LIBRARY);
     const [loadError, setLoadError] = useState(false);
     const [loading, setLoading] = useState(false);
@@ -121,65 +128,65 @@ export const useLibraryActions = (token, serverUrl, onUnauthorized) => {
     const resetLibrary = () => { setLibrary(EMPTY_LIBRARY); setSelectedSeries(null); };
 
     const handleDelete = async (item) => {
-        if (!confirm(`Delete "${item.title || item.filename}" permanently from disk?`)) return;
+        if (!await confirm(`Delete "${item.title || item.filename}" permanently from disk?`)) return;
         try {
             const res = await apiFetch(serverUrl, '/api/media', token, { method: 'DELETE', json: { path: item.path } });
             if (!res.ok) {
                 const data = await parseJsonSafe(res);
-                alert(`Delete failed: ${data.error || res.statusText}`);
+                toast.error(`Delete failed: ${data.error || res.statusText}`);
                 return;
             }
             fetchData(token);
-        } catch(e) { alert("Delete failed: " + e.message); }
+        } catch(e) { toast.error("Delete failed: " + e.message); }
     };
 
     const handleDeleteSeries = async (item) => {
         const seriesName = item.series_name || item.title;
-        if (!confirm(`Delete ALL ${item.episodes?.length || ''} episodes of "${seriesName}" permanently from disk?`)) return;
+        if (!await confirm(`Delete ALL ${item.episodes?.length || ''} episodes of "${seriesName}" permanently from disk?`)) return;
         try {
             const res = await apiFetch(serverUrl, `/api/series/${encodeURIComponent(seriesName)}`, token, { method: 'DELETE' });
             const data = await parseJsonSafe(res);
             if (!res.ok) {
-                alert(`Delete failed: ${data.error || res.statusText}`);
+                toast.error(`Delete failed: ${data.error || res.statusText}`);
                 return;
             }
             if (data.skipped > 0) {
-                alert(`Deleted ${data.deleted} episode(s). ${data.skipped} could not be deleted (not owned by you).`);
+                toast.info(`Deleted ${data.deleted} episode(s). ${data.skipped} could not be deleted (not owned by you).`);
             }
             fetchData(token);
-        } catch(e) { alert("Delete failed: " + e.message); }
+        } catch(e) { toast.error("Delete failed: " + e.message); }
     };
 
     const handleRenameMovie = async (item) => {
-        const newTitle = prompt("Enter new title:", item.title || item.filename);
+        const newTitle = await prompt({ title: 'Rename', label: 'Title', value: item.title || item.filename });
         if (!newTitle || !newTitle.trim() || newTitle.trim() === item.title) return;
         try {
             const res = await apiFetch(serverUrl, '/api/media/title', token, { method: 'PATCH', json: { path: item.path, title: newTitle.trim() } });
             const data = await parseJsonSafe(res);
             if (!res.ok) {
-                alert(`Rename failed: ${data.error || res.statusText}`);
+                toast.error(`Rename failed: ${data.error || res.statusText}`);
                 return;
             }
             fetchData(token);
-        } catch(e) { alert("Rename failed: " + e.message); }
+        } catch(e) { toast.error("Rename failed: " + e.message); }
     };
 
     const handleRenameSeries = async (item) => {
         const seriesName = item.series_name || item.title;
-        const newName = prompt("Enter new series name:", seriesName);
+        const newName = await prompt({ title: 'Rename series', label: 'Series name', value: seriesName });
         if (!newName || !newName.trim() || newName.trim() === seriesName) return;
         try {
             const res = await apiFetch(serverUrl, `/api/series/${encodeURIComponent(seriesName)}`, token, { method: 'PATCH', json: { newName: newName.trim() } });
             const data = await parseJsonSafe(res);
             if (!res.ok) {
-                alert(`Rename failed: ${data.error || res.statusText}`);
+                toast.error(`Rename failed: ${data.error || res.statusText}`);
                 return;
             }
             if (data.skipped > 0) {
-                alert(`Renamed ${data.renamed} episode(s). ${data.skipped} could not be renamed (not owned by you).`);
+                toast.info(`Renamed ${data.renamed} episode(s). ${data.skipped} could not be renamed (not owned by you).`);
             }
             fetchData(token);
-        } catch(e) { alert("Rename failed: " + e.message); }
+        } catch(e) { toast.error("Rename failed: " + e.message); }
     };
 
     // --- MOVE LOGIC ---
@@ -190,7 +197,7 @@ export const useLibraryActions = (token, serverUrl, onUnauthorized) => {
             ? 'Restore from NAS to Main Storage'
             : 'Offload to NAS Storage';
 
-        if (!confirm(`${actionText} for "${item.title || item.filename}"?`)) return;
+        if (!await confirm(`${actionText} for "${item.title || item.filename}"?`)) return;
 
         // Explicit reset, not just the render-time seed above — a filename moved once before
         // (archived, then later restored) already has a stale timestamp in the ref, which
@@ -224,12 +231,12 @@ export const useLibraryActions = (token, serverUrl, onUnauthorized) => {
 
                 // Also fetch fresh data to be safe
                 fetchData(token);
-                alert(result.message || "Operation successful"); // Optional feedback
+                toast.success(result.message || "Done");
             } else {
                 const err = await res.json();
-                alert(`Move failed: ${err.error}`);
+                toast.error(`Move failed: ${err.error}`);
             }
-        } catch (e) { alert("Move failed"); }
+        } catch (e) { toast.error("Move failed"); }
         finally {
             delete movingSinceRef.current[item.filename];
             setMovingFilenames(prev => prev.filter(f => f !== item.filename));
@@ -249,14 +256,14 @@ export const useLibraryActions = (token, serverUrl, onUnauthorized) => {
         try {
             const res = await apiFetch(serverUrl, '/api/share', token, { method: 'POST', json: body });
             const data = await parseJsonSafe(res);
-            if (!res.ok) { alert(`Share failed: ${data.error || res.statusText}`); return; }
+            if (!res.ok) { toast.error(`Share failed: ${data.error || res.statusText}`); return; }
             setShareLink({ url: `${window.location.origin}/share/${data.token}`, label: item.title || item.series_name });
-        } catch (e) { alert("Share failed: " + e.message); }
+        } catch (e) { toast.error("Share failed: " + e.message); }
     };
 
     const handleTogglePrivacy = async (item) => {
         const actionText = item.is_private ? "Unlock (Make Public)" : "Lock (Move to Private Vault)";
-        if (!confirm(`${actionText} for "${item.title || item.filename}"? This will physically move the file.`)) return;
+        if (!await confirm(`${actionText} for "${item.title || item.filename}"? This will physically move the file.`)) return;
 
         try {
             const res = await apiFetch(serverUrl, '/api/media/toggle-privacy', token, { method: 'POST', json: { path: item.path } });
@@ -282,12 +289,12 @@ export const useLibraryActions = (token, serverUrl, onUnauthorized) => {
                     episodes: updateItemInList(prev.episodes)
                 }) : prev);
 
-                alert("Privacy toggled successfully");
+                toast.success("Privacy updated");
             } else {
                 const err = await res.json();
-                alert(`Error: ${err.error}`);
+                toast.error(`Error: ${err.error}`);
             }
-        } catch (e) { console.error(e); alert("Failed to toggle privacy"); }
+        } catch (e) { console.error(e); toast.error("Failed to toggle privacy"); }
     };
 
     return {

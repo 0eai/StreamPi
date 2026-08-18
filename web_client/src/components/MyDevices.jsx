@@ -3,6 +3,8 @@ import { Laptop, Trash2 } from 'lucide-react';
 import { apiFetch, parseJsonSafe } from '../utils/api';
 import { deviceIcon } from '../utils/deviceIcons';
 import { formatRelativeTime } from '../utils/format';
+import { useDialogs } from './ui/dialogs';
+import { useToast } from './ui/toast';
 
 /** Below this, show "Active now" instead of a relative time. */
 const ACTIVE_NOW_MS = 2 * 60 * 1000;
@@ -26,6 +28,8 @@ const MyDevices = ({ token, serverUrl, onLogout }) => {
     // has no devices — on a screen the reader is demonstrably looking at from one. It is also the
     // real rollout state, since building the client and restarting the server are separate acts.
     const [unavailable, setUnavailable] = useState(false);
+    const { confirm } = useDialogs();
+    const toast = useToast();
 
     const loadDevices = async () => {
         try {
@@ -54,22 +58,34 @@ const MyDevices = ({ token, serverUrl, onLogout }) => {
         // here would leave the page running on a dead token — every poll 401s and the user sits in
         // a half-logged-in UI. onLogout aborts uploads, clears localStorage and resets the app.
         if (d.isCurrent) {
-            if (!confirm(`Sign out ${label}? That's the device you're using, so you'll be returned to the login screen.`)) return;
+            const ok = await confirm({
+                title: 'Sign out this device?',
+                message: `${label} is the device you are using, so you will be returned to the login screen.`,
+                confirmLabel: 'Sign Out',
+                danger: true,
+            });
+            if (!ok) return;
             onLogout();
             return;
         }
 
-        if (!confirm(`Sign out ${label}? It will need to sign in again. Anything it is already playing may continue until it stops.`)) return;
+        const ok = await confirm({
+            title: 'Sign out this device?',
+            message: `${label} will need to sign in again. Anything it is already playing may continue until it stops.`,
+            confirmLabel: 'Sign Out',
+            danger: true,
+        });
+        if (!ok) return;
         try {
             const res = await apiFetch(serverUrl, `/api/auth/devices/${d.id}`, token, { method: 'DELETE' });
             if (!res.ok) {
                 const data = await parseJsonSafe(res);
-                alert(`Sign out failed: ${data.error || res.statusText}`);
+                toast.error(`Sign out failed: ${data.error || res.statusText}`);
                 return;
             }
             loadDevices();
         } catch (e) {
-            alert(`Sign out failed: ${e.message}`);
+            toast.error(`Sign out failed: ${e.message}`);
         }
     };
 

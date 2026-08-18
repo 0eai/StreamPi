@@ -1,8 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { Shield } from 'lucide-react';
-import { apiFetch } from '../utils/api';
+import { apiFetch, parseJsonSafe } from '../utils/api';
+import { useDialogs } from './ui/dialogs';
+import { useToast } from './ui/toast';
 
 const UserManagement = ({ token, serverUrl }) => {
+    const { confirm } = useDialogs();
+    const toast = useToast();
     const [users, setUsers] = useState([]);
     
     const fetchUsers = async () => {
@@ -15,9 +19,27 @@ const UserManagement = ({ token, serverUrl }) => {
     useEffect(() => { fetchUsers(); }, []);
 
     const handleAction = async (userId, action) => {
-        if (!confirm(`Confirm ${action}?`)) return;
-        await apiFetch(serverUrl, '/api/admin/users/action', token, { method: 'POST', json: { userId, action } });
-        fetchUsers();
+        if (!await confirm({
+            title: `${action.charAt(0).toUpperCase()}${action.slice(1)} this user?`,
+            message: `The account will be ${action}d.`,
+            confirmLabel: action.charAt(0).toUpperCase() + action.slice(1),
+            danger: action === 'delete' || action === 'reject',
+        })) return;
+
+        // This previously fired and refetched without checking the response at all, so a refusal
+        // from the server — an admin trying to modify another admin, or to change a role — looked
+        // exactly like success: the list simply reappeared unchanged.
+        try {
+            const res = await apiFetch(serverUrl, '/api/admin/users/action', token, { method: 'POST', json: { userId, action } });
+            if (!res.ok) {
+                const data = await parseJsonSafe(res);
+                toast.error(`${action} failed: ${data.error || res.statusText}`);
+                return;
+            }
+            fetchUsers();
+        } catch (e) {
+            toast.error(`${action} failed: ${e.message}`);
+        }
     };
 
     const pendingUsers = users.filter(u => u.status === 'pending');

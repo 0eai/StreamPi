@@ -4,6 +4,7 @@ import { formatDuration } from '../utils/format';
 import { apiFetch } from '../utils/api';
 import { isNasOffline, nasOfflineMessage } from '../utils/nas';
 import MediaInfoModal from './MediaInfoModal';
+import { useToast } from './ui/toast';
 
 const formatFileSize = (bytes) => {
     if (!bytes || bytes === 0) return '0 B';
@@ -25,6 +26,7 @@ const getUniqueLanguages = (tracks) => {
 // metadata-badge and Info-button behavior exactly; every other prop/click behavior below is
 // unchanged from the inline markup this replaced.
 const EpisodeCard = ({ ep, availableNodeIds, movePercent, serverUrl, token, onPlay, onMove, onTogglePrivacy, onShare, onCast, onDelete }) => {
+    const toast = useToast();
     const nasOffline = isNasOffline(ep, availableNodeIds);
 
     const [metadata, setMetadata] = useState(null);
@@ -53,7 +55,7 @@ const EpisodeCard = ({ ep, availableNodeIds, movePercent, serverUrl, token, onPl
 
     const handlePlayClick = () => {
         // Restore reads from the same node a stream would, so an offline node rules out both.
-        if (nasOffline) alert(nasOfflineMessage(ep));
+        if (nasOffline) toast.error(nasOfflineMessage(ep));
         else if (ep.is_archived) onMove(ep);
         else onPlay(ep);
     };
@@ -121,7 +123,7 @@ const EpisodeCard = ({ ep, availableNodeIds, movePercent, serverUrl, token, onPl
             )}
 
             <div className="p-4 flex justify-between items-start">
-                <div onClick={() => nasOffline ? alert(nasOfflineMessage(ep)) : onPlay(ep)} className="cursor-pointer">
+                <div onClick={() => nasOffline ? toast.error(nasOfflineMessage(ep)) : onPlay(ep)} className="cursor-pointer">
                     <h4 className="font-bold text-white mb-1">Episode {ep.episode}</h4>
                     <p className="text-sm text-gray-400 font-mono">Season {ep.season}</p>
                 </div>

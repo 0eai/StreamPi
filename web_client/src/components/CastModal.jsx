@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Cast, Loader2, Tv, Smartphone, Monitor, Check } from 'lucide-react';
 import Modal from './ui/Modal';
+import { useToast } from './ui/toast';
 import { apiFetch, parseJsonSafe } from '../utils/api';
 
 const DEVICE_ICON = { tv: Tv, mobile: Smartphone, desktop: Monitor };
@@ -11,6 +12,7 @@ const DEVICE_ICON = { tv: Tv, mobile: Smartphone, desktop: Monitor };
 // seconds (both web_client and StreamPiTV poll /api/remote/pending). There's no push/ack
 // channel back, so this only ever reports "sent," never "confirmed playing."
 const CastModal = ({ item, onClose, serverUrl, token }) => {
+    const toast = useToast();
     const [state, setState] = useState('loading'); // loading | ready | error
     const [devices, setDevices] = useState([]);
     const [sentTo, setSentTo] = useState(null);
@@ -36,10 +38,10 @@ const CastModal = ({ item, onClose, serverUrl, token }) => {
                 json: { targetToken: device.token, path: item.path, startTime: item.progress || 0 },
             });
             const data = await parseJsonSafe(res);
-            if (!res.ok) { alert(`Cast failed: ${data.error || res.statusText}`); return; }
+            if (!res.ok) { toast.error(`Cast failed: ${data.error || res.statusText}`); return; }
             setSentTo(device.token);
             setTimeout(onClose, 1200);
-        } catch (e) { alert('Cast failed: ' + e.message); }
+        } catch (e) { toast.error('Cast failed: ' + e.message); }
     };
 
     return (

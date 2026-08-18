@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Share2, Copy, Check } from 'lucide-react';
 import Modal from './ui/Modal';
+import { useToast } from './ui/toast';
 import { copyToClipboard } from '../utils/clipboard';
 
 // Shown right after a share link is created (useLibraryActions.handleShare) — there's no
@@ -8,12 +9,13 @@ import { copyToClipboard } from '../utils/clipboard';
 // has nothing to configure; it's purely "here's the link, copy it," same shape as
 // CredentialsModal.jsx's copy-to-clipboard pattern.
 const ShareModal = ({ shareLink, onClose }) => {
+    const toast = useToast();
     const [copied, setCopied] = useState(false);
 
     const handleCopy = () => {
         copyToClipboard(shareLink.url)
             .then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); })
-            .catch(() => alert("Couldn't copy automatically — select the text and copy it manually."));
+            .catch(() => toast.error("Couldn't copy automatically — select the text and copy it manually."));
     };
 
     return (

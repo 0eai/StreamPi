@@ -1,15 +1,17 @@
 import React, { useState } from 'react';
 import { Server, Copy, Check } from 'lucide-react';
 import Modal from './ui/Modal';
+import { useToast } from './ui/toast';
 import { copyToClipboard } from '../utils/clipboard';
 
 const CredentialsModal = ({ credentials, onClose }) => {
+    const toast = useToast();
     const [copied, setCopied] = useState(null);
 
     const handleCopy = (field, value) => {
         copyToClipboard(value)
             .then(() => { setCopied(field); setTimeout(() => setCopied(null), 1500); })
-            .catch(() => alert("Couldn't copy automatically — select the text and copy it manually."));
+            .catch(() => toast.error("Couldn't copy automatically — select the text and copy it manually."));
     };
 
     return (
