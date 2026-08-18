@@ -18,6 +18,7 @@ import androidx.datastore.preferences.core.edit
 import com.example.streampitv.data.ApiClient
 import com.example.streampitv.data.Prefs
 import com.example.streampitv.data.SeriesItem
+import com.example.streampitv.data.SessionDeviceRequest
 import com.example.streampitv.data.VideoItem
 import com.example.streampitv.data.dataStore
 import com.example.streampitv.ui.screens.HomeScreen
@@ -30,6 +31,7 @@ import com.example.streampitv.ui.screens.SeriesDetailState
 import com.example.streampitv.ui.screens.SettingsScreen
 import com.example.streampitv.data.sortedForDisplay
 import com.example.streampitv.data.toVideoItem
+import com.example.streampitv.util.DeviceInfo
 import com.example.streampitv.util.SessionExpiry
 import com.example.streampitv.util.catching
 import com.example.streampitv.util.pollWithBackoff
@@ -157,6 +159,26 @@ fun StreamPiApp(context: Context) {
                 ?: return@pollWithBackoff
             activeVideo = hydrated
         }
+    }
+
+    /**
+     * Tell the server what this device is, once per launch.
+     *
+     * The session row's device label is written only at login, so a session created before this
+     * app learned to identify itself is stuck reporting the server's defaults — which is exactly
+     * why a Fire TV signed in earlier still appears as "Unknown Device / Web Browser" in another
+     * device's cast picker, and would stay that way until someone signed out and back in.
+     * Re-asserting it here heals those rows silently. Best-effort: older servers 404 this.
+     */
+    LaunchedEffect(serverUrl, token) {
+        val url = serverUrl ?: return@LaunchedEffect
+        val sessionToken = token ?: return@LaunchedEffect
+        catching {
+            ApiClient.of(url).updateSessionDevice(
+                "Bearer $sessionToken",
+                SessionDeviceRequest(device = DeviceInfo.name, device_type = DeviceInfo.TYPE)
+            )
+        }.onFailure { Log.w("StreamPi", "session device label not updated: ${it.message}") }
     }
 
     LaunchedEffect(Unit) {

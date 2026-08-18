@@ -15,6 +15,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.util.Log
 import coil.compose.AsyncImage
 import com.example.streampitv.data.VideoItem
 import com.example.streampitv.ui.theme.Tokens
@@ -44,6 +45,12 @@ fun PosterCard(
         Box(modifier = Modifier.fillMaxSize().background(Tokens.surface2)) {
             AsyncImage(
                 model = "$serverUrl/api/posters/${item.poster}",
+                // A failed load draws nothing at all, so a missing poster is indistinguishable
+                // from a dark thumbnail. Logging it is the only way to tell which posters are
+                // failing on a device we cannot attach a debugger to.
+                onError = {
+                    Log.w("StreamPi", "poster failed: ${item.poster} — ${it.result.throwable.message}")
+                },
                 contentDescription = item.title,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()

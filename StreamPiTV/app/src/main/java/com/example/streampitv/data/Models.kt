@@ -304,3 +304,9 @@ data class MyShare(
 }
 
 data class MySharesResponse(val shares: List<MyShare> = emptyList())
+
+/**
+ * Body for POST /api/auth/session/device. snake_case for the same reason KunjiFinalizeRequest is:
+ * the server destructures `device_type` verbatim.
+ */
+data class SessionDeviceRequest(val device: String, val device_type: String)

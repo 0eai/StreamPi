@@ -90,6 +90,20 @@ interface ApiService {
     @GET("/api/auth/me")
     suspend fun me(@Header("Authorization") token: String): MeResponse
 
+    /**
+     * Re-asserts this device's label on its own session row.
+     *
+     * The row is written once at login, so a session created before the app learned to identify
+     * itself keeps the server's defaults — which is why a Fire TV signed in earlier still shows
+     * as "Unknown Device / Web Browser" in another device's cast picker. Called on launch so the
+     * row heals without a sign-out. 404s on older servers; callers must tolerate it.
+     */
+    @POST("/api/auth/session/device")
+    suspend fun updateSessionDevice(
+        @Header("Authorization") token: String,
+        @Body request: SessionDeviceRequest
+    ): OkResponse
+
     // ─── Share links ────────────────────────────────────────────────────────
     /**
      * Mints a public, unauthenticated link to one file or a whole series.
