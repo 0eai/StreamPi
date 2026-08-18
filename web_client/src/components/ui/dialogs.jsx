@@ -12,8 +12,8 @@ import Input from './Input';
  * each becomes `if (!await confirm(msg)) return;`: one keyword, same control flow, no restructuring.
  * A callback- or state-based dialog would have meant rewriting each handler inside-out.
  *
- * Transient notices are NOT here — see ./toast.jsx. This module is only for the two cases that
- * genuinely need an answer before the code can continue.
+ * Transient notices are NOT here — see ./toast.jsx. This module is only for the cases that genuinely
+ * need an answer before the code can continue: confirm, prompt, and choose (more than two outcomes).
  *
  * Only one dialog is ever open at a time; a second call while one is pending replaces it and
  * resolves the first as cancelled, which is the honest outcome — the user never saw it to answer.
@@ -21,13 +21,25 @@ import Input from './Input';
 
 const DialogContext = createContext(null);
 
+/**
+ * What a dismissal resolves to, per kind — the value each caller's falsy check expects. Written as a
+ * conditional rather than a lookup table on purpose: `TABLE[kind] ?? false` would turn the deliberate
+ * null for prompt/choose back into false, since ?? treats null as absent.
+ */
+const cancelValueFor = (kind) => (kind === 'confirm' ? false : null);
+
 export const DialogProvider = ({ children }) => {
     const [dialog, setDialog] = useState(null);
     const resolveRef = useRef(null);
+    // The pending dialog's own kind. Superseding used to read it off the *incoming* spec, which
+    // resolved the outgoing promise with the wrong kind's cancel value — harmless while every one was
+    // falsy, but wrong, and `choose` callers compare against null specifically.
+    const pendingKindRef = useRef(null);
 
     const settle = useCallback((value) => {
         const resolve = resolveRef.current;
         resolveRef.current = null;
+        pendingKindRef.current = null;
         setDialog(null);
         resolve?.(value);
     }, []);
@@ -35,8 +47,9 @@ export const DialogProvider = ({ children }) => {
     const open = useCallback((spec) => new Promise((resolve) => {
         // Supersede rather than queue or ignore: the caller is waiting on a promise, so leaving it
         // unresolved would hang that handler forever.
-        resolveRef.current?.(spec.kind === 'prompt' ? null : false);
+        resolveRef.current?.(cancelValueFor(pendingKindRef.current));
         resolveRef.current = resolve;
+        pendingKindRef.current = spec.kind;
         setDialog(spec);
     }), []);
 
@@ -60,6 +73,16 @@ export const DialogProvider = ({ children }) => {
                 kind: 'prompt',
                 ...(typeof arg === 'string' ? { label: arg } : arg),
             }),
+            /**
+             * `choose({ title, message, options: [{ label, value, variant }] })`. Resolves the chosen
+             * option's value, or null when dismissed.
+             *
+             * For the case confirm can't express: not "do this, yes or no" but "there are two
+             * different things you might mean here". The first is clearing a node's owner, where
+             * "also regenerate the key" is a genuinely separate outcome rather than a stronger yes —
+             * offering it as a second confirm would make the safe option take two dialogs.
+             */
+            choose: (arg) => open({ kind: 'choose', ...arg }),
         };
     }
 
@@ -68,6 +91,7 @@ export const DialogProvider = ({ children }) => {
             {children}
             {dialog?.kind === 'confirm' && <ConfirmDialog spec={dialog} onSettle={settle} />}
             {dialog?.kind === 'prompt' && <PromptDialog spec={dialog} onSettle={settle} />}
+            {dialog?.kind === 'choose' && <ChooseDialog spec={dialog} onSettle={settle} />}
         </DialogContext.Provider>
     );
 };
@@ -86,8 +110,9 @@ const ConfirmDialog = ({ spec, onSettle }) => (
         <p className="text-sm text-muted whitespace-pre-line">{spec.message}</p>
         <div className="flex justify-end gap-2 mt-6">
             <Button variant="ghost" onClick={() => onSettle(false)}>{spec.cancelLabel || 'Cancel'}</Button>
-            {/* Focus deliberately stays on Cancel (Modal focuses the first focusable, and Cancel is
-                rendered first) so a stray Enter on a destructive prompt does nothing. */}
+            {/* Nothing here is focused on open — Modal focuses the first focusable in the panel, which
+                is its header close button — so a stray Enter dismisses rather than confirming. Keep
+                Cancel ahead of the confirm button so that stays true if Modal's focus rule changes. */}
             {/* Always `primary`: the app's accent already IS red (#dc2626), so the confirm button
                 reads as consequential without needing Button's quiet `danger` variant, which is
                 meant for a destructive control sitting *among* others rather than being the
@@ -95,6 +120,30 @@ const ConfirmDialog = ({ spec, onSettle }) => (
             <Button variant="primary" onClick={() => onSettle(true)}>
                 {spec.confirmLabel || 'Confirm'}
             </Button>
+        </div>
+    </Modal>
+);
+
+const ChooseDialog = ({ spec, onSettle }) => (
+    <Modal
+        isOpen
+        onClose={() => onSettle(null)}
+        nested
+        title={spec.danger
+            ? <><AlertTriangle className="w-5 h-5 text-danger" /> {spec.title || 'Choose an action'}</>
+            : (spec.title || 'Choose an action')}
+    >
+        <p className="text-sm text-muted whitespace-pre-line">{spec.message}</p>
+        {/* Stacked rather than a row: these labels are whole phrases ("Clear + Regenerate Key"), and
+            side by side they'd be unreadable at the narrower widths this modal takes. Cancel stays
+            first so it keeps the initial focus, as in ConfirmDialog. */}
+        <div className="flex flex-col gap-2 mt-6">
+            <Button variant="ghost" onClick={() => onSettle(null)}>{spec.cancelLabel || 'Cancel'}</Button>
+            {(spec.options || []).map((opt) => (
+                <Button key={opt.value} variant={opt.variant || 'primary'} onClick={() => onSettle(opt.value)}>
+                    {opt.label}
+                </Button>
+            ))}
         </div>
     </Modal>
 );

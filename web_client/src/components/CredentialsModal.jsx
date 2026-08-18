@@ -36,7 +36,10 @@ const CredentialsModal = ({ credentials, onClose }) => {
                         </button>
                     </div>
                 </div>
-                <p className="text-[11px] text-gray-500">Paste these into that node's <code className="text-gray-400">node_config.json</code> (id, apiKey, roles) and restart it.</p>
+                {/* Roles get a sentence of their own now that creation no longer issues them: the node
+                    won't boot without a non-empty roles array, so the operator setting them here is
+                    load-bearing rather than a detail. */}
+                <p className="text-[11px] text-gray-500">Paste these into that node&apos;s <code className="text-gray-400">node_config.json</code>, set its <code className="text-gray-400">roles</code> there (<code className="text-gray-400">&quot;transcoder&quot;</code>, <code className="text-gray-400">&quot;nas&quot;</code>, or both), and restart it.</p>
             </div>
             <button onClick={onClose} className="w-full mt-6 bg-white text-black font-bold py-2 rounded hover:bg-gray-200 transition-colors">Done</button>
         </Modal>

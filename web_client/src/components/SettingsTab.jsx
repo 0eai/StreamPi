@@ -21,7 +21,7 @@ const isAdmin = (role) => role === 'admin' || role === 'super_admin';
 // way to reach change-password/Kunji-link). Admins additionally get User Management, Nodes,
 // and Activity Log — previously all three lived inside DashboardTab.jsx.
 const SettingsTab = ({ token, serverUrl, username, role, onLogout }) => {
-    const { confirm } = useDialogs();
+    const { confirm, choose } = useDialogs();
     const toast = useToast();
     const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
     const [isKunjiModalOpen, setIsKunjiModalOpen] = useState(false);
@@ -127,12 +127,59 @@ const SettingsTab = ({ token, serverUrl, username, role, onLogout }) => {
         } catch (e) { toast.error("Remove failed: " + e.message); }
     };
 
-    const handleSetOwner = async (node, ownerUserId) => {
-        try {
-            const res = await apiFetch(serverUrl, `/api/admin/nodes/${node.id}/owner`, token, { method: 'POST', json: { ownerUserId: ownerUserId ? Number(ownerUserId) : null } });
+    const setOwner = async (node, ownerUserId) => {
+        const res = await apiFetch(serverUrl, `/api/admin/nodes/${node.id}/owner`, token, { method: 'POST', json: { ownerUserId } });
+        if (!res.ok) {
             const result = await parseJsonSafe(res);
-            if (!res.ok) toast.error(`Set owner failed: ${result.error || res.statusText}`);
-        } catch (e) { toast.error("Set owner failed: " + e.message); }
+            throw new Error(result.error || res.statusText);
+        }
+    };
+
+    const handleSetOwner = async (node, ownerUserId) => {
+        const clearingAnExistingOwner = !ownerUserId && node.ownerUserId;
+
+        // Clearing an owner does NOT revoke their access, which is the part that isn't obvious:
+        // /api/node-owner/:id/config proxies the node's own config payload, and that includes the raw
+        // apiKey — so a past owner keeps a copy and can re-claim the moment the node is unowned.
+        // Regenerating is what actually locks them out, so it's offered here rather than left as a
+        // second thing the admin has to know to do.
+        let alsoRegenerate = false;
+        if (clearingAnExistingOwner) {
+            const choice = await choose({
+                title: "Clear this node's owner?",
+                message: `${node.ownerUsername || 'The current owner'} keeps a copy of this node's API key, so they can claim it again. Regenerating the key is what revokes their access.`,
+                danger: true,
+                options: [
+                    { label: 'Clear + Regenerate Key', value: 'clear+regenerate' },
+                    { label: 'Clear Only', value: 'clear', variant: 'ghost' },
+                ],
+            });
+            if (!choice) return;
+            alsoRegenerate = choice === 'clear+regenerate';
+        }
+
+        try {
+            await setOwner(node, ownerUserId ? Number(ownerUserId) : null);
+        } catch (e) {
+            toast.error("Set owner failed: " + e.message);
+            return;
+        }
+
+        if (!alsoRegenerate) return;
+
+        // Second leg. If it fails the first already succeeded, so say exactly that rather than a bare
+        // "failed" — the node is now unowned with a key the previous owner still holds.
+        try {
+            const res = await apiFetch(serverUrl, `/api/admin/nodes/${node.id}/regenerate`, token, { method: 'POST' });
+            const result = await parseJsonSafe(res);
+            if (!res.ok) {
+                toast.error(`Owner cleared, but the key was NOT regenerated (${result.error || res.statusText}) — the previous owner can still claim it. Use Regenerate to finish.`);
+                return;
+            }
+            setNodeCredentials(result);
+        } catch (e) {
+            toast.error(`Owner cleared, but the key was NOT regenerated (${e.message}) — the previous owner can still claim it. Use Regenerate to finish.`);
+        }
     };
 
     return (
@@ -259,11 +306,17 @@ const SettingsTab = ({ token, serverUrl, username, role, onLogout }) => {
                                                     <div className="text-[10px] text-gray-500 font-mono">{n.id}</div>
                                                     {n.connection && <div className="text-[10px] text-gray-600 font-mono">{n.connection}</div>}
                                                 </td>
+                                                {/* Roles are no longer chosen at creation — they come from what the node
+                                                    reports about itself, so a node that has never connected has none yet.
+                                                    A dash says that; the bare empty div this used to render just looked
+                                                    like a rendering bug. */}
                                                 <td className="px-6 py-3">
-                                                    <div className="flex gap-1">
-                                                        {n.roles.includes('transcoder') && <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-purple-900/40 text-purple-300">TRANSCODER</span>}
-                                                        {n.roles.includes('nas') && <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-orange-900/40 text-orange-300">NAS</span>}
-                                                    </div>
+                                                    {n.roles.length === 0 ? <span className="text-gray-600">—</span> : (
+                                                        <div className="flex gap-1">
+                                                            {n.roles.includes('transcoder') && <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-purple-900/40 text-purple-300">TRANSCODER</span>}
+                                                            {n.roles.includes('nas') && <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-orange-900/40 text-orange-300">NAS</span>}
+                                                        </div>
+                                                    )}
                                                 </td>
                                                 <td className="px-6 py-3">
                                                     <div className="flex items-center gap-2">
