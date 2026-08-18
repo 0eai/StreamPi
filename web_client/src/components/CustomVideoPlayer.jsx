@@ -3,6 +3,7 @@ import { Play, Pause, Volume2, VolumeX, Maximize, SkipBack, SkipForward, ArrowLe
 import { formatDuration } from '../utils/format';
 import { getBrowserCodecs } from '../utils/device';
 import { apiFetch } from '../utils/api';
+import { randomId } from '../utils/randomId';
 
 const CustomVideoPlayer = ({ item, token, onClose, serverUrl, onPlayNext, isPublic = false, shareToken = null }) => {
     const videoRef = useRef(null);
@@ -13,7 +14,12 @@ const CustomVideoPlayer = ({ item, token, onClose, serverUrl, onPlayNext, isPubl
     // server's own close/error/finish listeners depend entirely on the client's TCP connection
     // actually tearing down, which iOS Safari doesn't reliably do the moment a custom player
     // closes — without this, a stream could sit "active" for hours after the viewer left.
-    const sessionIdRef = useRef(crypto.randomUUID());
+    // randomId(), not crypto.randomUUID(), which is secure-context-only and threw here over plain
+    // http://<lan-ip>. Assigned lazily rather than as useRef's argument, which would mint and
+    // discard an id on every render — and this component re-renders several times a second while
+    // playing, off timeupdate.
+    const sessionIdRef = useRef(null);
+    if (!sessionIdRef.current) sessionIdRef.current = randomId();
     const [playing, setPlaying] = useState(false); // Default to false, let useEffect set true
     const [currentTime, setCurrentTime] = useState(0);
     const [duration, setDuration] = useState(0);
