@@ -110,28 +110,39 @@ router.post('/api/admin/nodes', verifyToken, async (req, res) => {
     if (req.user.role !== 'super_admin' && req.user.role !== 'admin') {
         return res.status(403).json({ error: "Access Denied" });
     }
-    const { name, roles, ownerUserId } = req.body;
-    const cleanRoles = Array.isArray(roles) ? roles.filter(r => ['transcoder', 'nas'].includes(r)) : [];
-    if (!name || !cleanRoles.length) return res.status(400).json({ error: "Name and at least one role are required" });
+    // Roles are deliberately not accepted here any more. They were required, stored, and then only
+    // ever displayed — and only until the node first connected, after which the live Firebase-reported
+    // value wins (see the comment above the dashboard's node mapping). What actually decides whether a
+    // node transcodes or stores is its own node_config.json, which node/config.js refuses to boot
+    // without. So asking at creation looked like a capability grant while granting nothing; the column
+    // is left empty and the UI shows "—" until the node reports in.
+    //
+    // ownerUserId is not accepted either. It was written straight through with no existence check
+    // (unlike the /owner route below), so a bad id created a node owned by nobody — which, now that
+    // claiming requires the node to be unowned, would make it permanently unclaimable. Ownership is
+    // set afterwards, by an admin via /owner or by the operator via /api/node-owner/:id/claim.
+    const { name } = req.body;
+    if (!name) return res.status(400).json({ error: "Name is required" });
 
     try {
         let id;
         do { id = generateNodeId(name); } while (await db.get("SELECT 1 FROM nodes WHERE id = ?", id));
 
         const apiKey = generateApiKey();
-        const rolesStr = cleanRoles.join(',');
 
         await db.run(
-            "INSERT INTO nodes (id, name, roles, api_key, created_at, revoked, owner_user_id) VALUES (?, ?, ?, ?, ?, 0, ?)",
-            [id, name, rolesStr, apiKey, new Date().toISOString(), ownerUserId || null]
+            "INSERT INTO nodes (id, name, roles, api_key, created_at, revoked, owner_user_id) VALUES (?, ?, '', ?, ?, 0, NULL)",
+            [id, name, apiKey, new Date().toISOString()]
         );
 
         if (isFirebaseActive) {
-            await admin.database().ref(`node_keys/${id}`).set({ hash: hashApiKey(apiKey), roles: cleanRoles, revoked: false });
+            // No roles in this payload: nothing ever read node_keys/{id}.roles, and the RTDB rule that
+            // authorizes a node's own registration write reads only `hash` and `revoked`.
+            await admin.database().ref(`node_keys/${id}`).set({ hash: hashApiKey(apiKey), revoked: false });
         }
 
-        await logActivity(req.user.username, "NODE_CREATE", `Created node "${name}" (${rolesStr})`, req.ip);
-        res.json({ success: true, id, name, roles: cleanRoles, apiKey });
+        await logActivity(req.user.username, "NODE_CREATE", `Created node "${name}"`, req.ip);
+        res.json({ success: true, id, name, apiKey });
     } catch (e) { sendServerError(res, e); }
 });
 
@@ -280,6 +291,10 @@ router.post('/api/admin/users/action', verifyToken, async (req, res) => {
 
         if (action === 'reject' || action === 'delete') {
             await db.run("DELETE FROM sessions WHERE username = ?", targetUser.username);
+            // Release any nodes this user owned. Without this the node keeps a non-null owner_user_id
+            // pointing at a row that no longer exists — the Owner dropdown reads blank, and because
+            // claiming requires the node to be unowned, nobody could ever take it over again.
+            await db.run("UPDATE nodes SET owner_user_id = NULL WHERE owner_user_id = ?", userId);
             await db.run("DELETE FROM users WHERE id = ?", userId);
         }
 
