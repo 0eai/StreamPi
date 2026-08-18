@@ -40,13 +40,16 @@ export const claimNode = async (req, res) => {
         // One atomic conditional write instead of read-then-write: two people racing a claim on the
         // same unowned node would both pass a prior read. `revoked = 0` matches the two existing key
         // checks (db.verifyNodeKey, nodeDiscovery) — omitting it would leave this route quietly
-        // disagreeing with them. Re-claiming as the existing owner is idempotent for free, since
-        // SQLite counts a matched row even when the value is unchanged.
+        // disagreeing with them.
+        //
+        // Matching only `owner_user_id IS NULL`, rather than also the caller's own id, is what keeps
+        // the log honest: re-claiming a node you already own changes nothing, so it must not write a
+        // second "Claimed ownership" line that reads like ownership moved again. That case is handled
+        // as an idempotent success below, off the classification read.
         const result = await db.run(
             `UPDATE nodes SET owner_user_id = ?
-              WHERE id = ? AND api_key = ? AND revoked = 0
-                AND (owner_user_id IS NULL OR owner_user_id = ?)`,
-            [req.user.id, req.params.id, apiKey, req.user.id]
+              WHERE id = ? AND api_key = ? AND revoked = 0 AND owner_user_id IS NULL`,
+            [req.user.id, req.params.id, apiKey]
         );
 
         if (result.changes === 1) {
@@ -67,6 +70,10 @@ export const claimNode = async (req, res) => {
         const node = await db.get("SELECT name, api_key, revoked, owner_user_id FROM nodes WHERE id = ?", req.params.id);
         if (!node) return res.status(404).json({ error: "Node not found" });
         if (node.revoked || node.api_key !== apiKey) return res.status(403).json({ error: "Access Denied" });
+
+        // Already yours. A success, because the caller asked for a state that holds — and silent,
+        // because nothing changed.
+        if (node.owner_user_id === req.user.id) return res.json({ success: true });
 
         // Naming the owner is deliberate. The 409 itself already discloses that the node has one, so
         // withholding the username protects nothing while making the message unactionable — and the

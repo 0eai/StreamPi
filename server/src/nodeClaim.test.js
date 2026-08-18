@@ -66,23 +66,26 @@ describe('claimNode', () => {
         expect(sql).toContain('owner_user_id IS NULL');
         expect(sql).toContain('api_key = ?');
         expect(sql).toContain('revoked = 0');
-        expect(params).toEqual([7, 'n1', 'correct-key', 7]);
+        expect(params).toEqual([7, 'n1', 'correct-key']);
 
         expect(logActivityMock).toHaveBeenCalledWith(
             'ranjan', 'NODE_CLAIM', 'Claimed ownership of node "ankit"', '192.168.1.5'
         );
     });
 
-    it('is idempotent when the caller already owns the node', async () => {
-        // SQLite counts a matched row even when the value is unchanged, so the same write covers this.
-        dbMock.run.mockResolvedValueOnce({ changes: 1 });
-        dbMock.get.mockResolvedValueOnce({ name: 'ankit' });
+    it('is idempotent when the caller already owns the node, and logs nothing', async () => {
+        // The write matches only unowned rows, so this falls through to the classification read. It
+        // must still be a success — the caller asked for a state that already holds — but it must not
+        // write a second "Claimed ownership" line, which would read as though ownership moved again.
+        dbMock.run.mockResolvedValueOnce({ changes: 0 });
+        dbMock.get.mockResolvedValueOnce({ name: 'ankit', api_key: 'correct-key', revoked: 0, owner_user_id: 7 });
 
         const { req, res } = mockReqRes({ user: USER, body: { apiKey: 'correct-key' } });
         await claimNode(req, res);
 
         expect(res.statusCode).toBe(200);
         expect(res.body).toEqual({ success: true });
+        expect(logActivityMock).not.toHaveBeenCalled();
     });
 
     it('404s an unknown node', async () => {
