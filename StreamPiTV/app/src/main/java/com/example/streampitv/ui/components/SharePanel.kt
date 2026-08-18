@@ -206,7 +206,10 @@ fun SharePanel(
                 val qrSize = 300.dp
                 val qrPx = with(LocalDensity.current) { qrSize.roundToPx() }
 
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(28.dp)) {
+                // Actions live in the right-hand column under the link rather than full-width
+                // beneath the QR: it keeps the whole panel to the height of the code itself, and
+                // puts "Done"/"Revoke" next to the thing they act on instead of a screen away.
+                Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(28.dp)) {
                     // White plate with its own quiet zone. Not tinted to match the dark theme:
                     // scanners need the contrast and the margin.
                     Box(
@@ -244,18 +247,18 @@ fun SharePanel(
                                 fontSize = 12.sp
                             )
                         }
-                    }
-                }
 
-                Spacer(Modifier.height(24.dp))
-                SheetRow(
-                    label = "Done",
-                    icon = Icons.Default.Close,
-                    modifier = Modifier.focusRequester(firstAction)
-                ) { if (acceptsInput) onDismiss() }
-                Spacer(Modifier.height(10.dp))
-                SheetRow("Revoke this link", Icons.Default.Delete, Tokens.dangerText) {
-                    if (acceptsInput) confirmingRevoke = true
+                        Spacer(Modifier.height(20.dp))
+                        SheetRow(
+                            label = "Done",
+                            icon = Icons.Default.Close,
+                            modifier = Modifier.focusRequester(firstAction)
+                        ) { if (acceptsInput) onDismiss() }
+                        Spacer(Modifier.height(10.dp))
+                        SheetRow("Revoke this link", Icons.Default.Delete, Tokens.dangerText) {
+                            if (acceptsInput) confirmingRevoke = true
+                        }
+                    }
                 }
             }
         }
