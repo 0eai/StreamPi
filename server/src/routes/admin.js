@@ -396,12 +396,60 @@ router.delete('/api/admin/devices/:id', verifyToken, async (req, res) => {
     } catch (e) { sendServerError(res, e); }
 });
 
+/**
+ * Recent activity, optionally narrowed to one user.
+ *
+ * The filter is applied in SQL rather than in the client because of the LIMIT: filtering 100
+ * already-fetched rows would silently show nothing for a user whose activity is older than the most
+ * recent hundred entries, which is indistinguishable from "this user has done nothing". Filtering
+ * first, then limiting, answers the question actually being asked.
+ *
+ * `usernames` comes from a DISTINCT over the whole table so the client's dropdown is complete —
+ * including users since deleted, whose log rows outlive their account.
+ *
+ * NOTE the response shape changed from a bare array to an object. The client tolerates both, because
+ * deploying the built client and restarting this server are separate acts by different hands.
+ */
 router.get('/api/admin/activity', verifyToken, async (req, res) => {
     if (req.user.role !== 'super_admin') return res.status(403).json({ error: "Access Denied" });
 
+    if (!db) await initDB();
     try {
-        const logs = await db.all("SELECT * FROM activity_logs ORDER BY timestamp DESC LIMIT 100");
-        res.json(logs);
+        const { username } = req.query;
+        const logs = username
+            ? await db.all(
+                "SELECT * FROM activity_logs WHERE username = ? ORDER BY timestamp DESC LIMIT 100",
+                [username]
+            )
+            : await db.all("SELECT * FROM activity_logs ORDER BY timestamp DESC LIMIT 100");
+
+        const owners = await db.all(
+            "SELECT DISTINCT username FROM activity_logs WHERE username IS NOT NULL ORDER BY username"
+        );
+        res.json({ logs, usernames: owners.map(o => o.username) });
+    } catch (e) {
+        sendServerError(res, e);
+    }
+});
+
+/**
+ * Delete one activity row.
+ *
+ * Nothing prunes activity_logs, which is why this exists — the table only grows.
+ *
+ * Deliberately writes NO log entry of its own, by explicit decision. The consequence, recorded here
+ * so nobody later assumes otherwise: this table is an editable record, not an audit trail. Rows can
+ * be removed without a trace, including by the person whose actions they describe, so it should not
+ * be relied on as evidence of what did or did not happen.
+ */
+router.delete('/api/admin/activity/:id', verifyToken, async (req, res) => {
+    if (req.user.role !== 'super_admin') return res.status(403).json({ error: "Access Denied" });
+
+    if (!db) await initDB();
+    try {
+        const result = await db.run("DELETE FROM activity_logs WHERE id = ?", req.params.id);
+        if (!result?.changes) return res.status(404).json({ error: "Entry not found" });
+        res.json({ success: true });
     } catch (e) {
         sendServerError(res, e);
     }
