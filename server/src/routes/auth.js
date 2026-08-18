@@ -212,6 +212,36 @@ router.get('/api/auth/sessions', verifyToken, async (req, res) => {
     } catch (e) { sendServerError(res, e); }
 });
 
+/**
+ * Lets a session correct its own device label.
+ *
+ * The label is otherwise written exactly once, at login, so a session created before its client
+ * knew how to identify itself is stuck with the defaults — which is how a Fire TV ends up listed
+ * as "Unknown Device / Web Browser" in the cast picker, and stays that way until someone signs
+ * out and back in. Clients call this on launch instead, so those rows heal themselves.
+ *
+ * Scoped to the caller's own token: a session may relabel itself and nothing else. A stream
+ * token passes verifyToken but has no sessions row, so it simply matches nothing.
+ */
+router.post('/api/auth/session/device', verifyToken, async (req, res) => {
+    const { device, device_type } = req.body || {};
+    if (!device && !device_type) return res.status(400).json({ error: "Nothing to update" });
+
+    if (!db) await initDB();
+    try {
+        const token = req.headers.authorization?.split('Bearer ')[1] || req.query.token;
+        // Truncated because this lands in the admin device list and the cast picker verbatim,
+        // and Build.MODEL is attacker-influenced on a rooted box.
+        const clip = (v) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 80) : null);
+        const result = await db.run(
+            `UPDATE sessions SET device = COALESCE(?, device), device_type = COALESCE(?, device_type)
+             WHERE token = ? AND username = ?`,
+            [clip(device), clip(device_type), token, req.user.username]
+        );
+        res.json({ success: true, updated: result?.changes ?? 0 });
+    } catch (e) { sendServerError(res, e); }
+});
+
 router.post('/api/auth/change-password', verifyToken, async (req, res) => {
     const { oldPassword, newPassword } = req.body;
     const username = req.user.username;
