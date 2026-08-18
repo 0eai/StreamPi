@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Smartphone, UploadCloud, Monitor, Tv, Loader2, HardDrive, Activity, Cpu, ArrowUp, ArrowDown, XCircle, Globe, Radio, Wifi, WifiOff } from 'lucide-react';
-import { formatDuration, formatBytes, formatNetworkSpeed } from '../utils/format';
+import { formatDuration, formatBytes, formatNetworkSpeed, formatRelativeTime } from '../utils/format';
 import { usePolling } from '../utils/usePolling';
 import { apiFetch, parseJsonSafe } from '../utils/api';
 
@@ -197,7 +197,7 @@ const DashboardTab = ({ token, serverUrl }) => {
                                                 </div>
                                             </td>
                                             <td className="px-6 py-3 text-white">{u.location || 'Unknown'}</td>
-                                            <td className="px-6 py-3 text-right text-gray-500">{Math.floor((Date.now() - u.last_active)/1000)}s ago</td>
+                                            <td className="px-6 py-3 text-right text-gray-500">{formatRelativeTime(u.last_active)}</td>
                                         </tr>
                                     ))
                                 )}

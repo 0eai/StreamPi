@@ -29,3 +29,30 @@ export const formatDate = (dateString) => {
         month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
     });
 };
+
+/**
+ * Coarse "how long ago" for a millisecond epoch, e.g. "4h ago".
+ *
+ * `now` is injectable so this is testable without freezing the clock.
+ *
+ * The clamp is not defensive dressing: these timestamps come from the Pi's clock and are compared
+ * against the browser's, and even a couple of seconds of skew otherwise renders "-3s ago".
+ *
+ * Sub-minute output stays in seconds so this is behaviour-identical to the hand-rolled version it
+ * replaces in DashboardTab, which only ever had seconds and printed things like "247s ago" for
+ * anything older than a minute.
+ */
+export const formatRelativeTime = (epochMs, now = Date.now()) => {
+    if (!epochMs) return 'unknown';
+
+    const seconds = Math.max(0, Math.floor((now - epochMs) / 1000));
+    if (seconds < 60) return `${seconds}s ago`;
+
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+
+    return `${Math.floor(hours / 24)}d ago`;
+};

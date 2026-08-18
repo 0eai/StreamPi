@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Film, Tv, Clock, Pencil, WifiOff } from 'lucide-react';
 import { SERVER_URL, apiFetch } from './utils/api';
+import { getDeviceInfo } from './utils/device';
 import { useNasAvailability } from './utils/nas';
 import { usePolling } from './utils/usePolling';
 import { useLibraryActions } from './utils/useLibraryActions';
@@ -56,6 +57,22 @@ export default function StreamApp() {
         setActiveVideo(null);
         setActiveTab('home');
     };
+
+    // Keep this session's device label current, the same way the TV app does. The label is
+    // written once at login, so a browser signed in months ago still carries whatever
+    // getDeviceInfo() guessed then — which is the same root cause as a Fire TV showing up as
+    // "Unknown Device / Web Browser". Best-effort: older servers 404 this route.
+    //
+    // Note this makes labels current, not correct: getDeviceInfo tests /linux/i before its TV
+    // arm, so many smart-TV browsers still report "Linux PC".
+    useEffect(() => {
+        if (!token) return;
+        const { device, type } = getDeviceInfo();
+        apiFetch(SERVER_URL, '/api/auth/session/device', token, {
+            method: 'POST',
+            json: { device, device_type: type },
+        }).catch(() => { /* label stays as-is; nothing user-visible depends on it here */ });
+    }, [token]);
 
     const libraryActions = useLibraryActions(token, SERVER_URL, handleLogout);
     // Polled separately from the library: node reachability changes while the page is
@@ -211,7 +228,7 @@ export default function StreamApp() {
                             <DashboardTab token={token} serverUrl={SERVER_URL} />
                         )}
                         {activeTab === 'settings' && (
-                            <SettingsTab token={token} serverUrl={SERVER_URL} username={username} role={role} />
+                            <SettingsTab token={token} serverUrl={SERVER_URL} username={username} role={role} onLogout={handleLogout} />
                         )}
                     </>
                 )}

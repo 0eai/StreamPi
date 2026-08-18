@@ -3,7 +3,7 @@ import crypto from 'crypto';
 import axios from 'axios';
 import { db, initDB, logActivity } from '../db.js';
 import { verifyToken } from '../middleware.js';
-import { hashPassword, hashPasswordLegacy, generateSalt } from '../cryptoHelpers.js';
+import { hashPassword, hashPasswordLegacy, generateSalt, sessionIdFor } from '../cryptoHelpers.js';
 import { KUNJI_CALLBACK_URL, KUNJI_AUDIENCE } from '../config.js';
 import { KUNJI_SESSIONS, KUNJI_RECENTLY_APPROVED, startKunjiSession } from '../kunjiRelay.js';
 import { STREAM_TOKENS } from '../state.js';
@@ -11,6 +11,26 @@ import { isFirebaseActive } from '../firebaseBootstrap.js';
 import { sendServerError } from '../logger.js';
 
 const router = express.Router();
+
+/**
+ * Normalizes a session row's self-reported device strings into one of four kinds.
+ *
+ * The clients disagree with each other on what a TV reports: the TV app's password path sends the
+ * literal "Android TV", its kunji path historically sent nothing at all (so the row kept the
+ * server's 'Web Browser' default — the bug that POST /api/auth/session/device now heals), and an
+ * actual TV *browser* sends 'TV' from web_client's getDeviceInfo(). Derived once here so no
+ * consumer re-implements the fuzzy match, and so the contract with
+ * StreamPiTV/util/DeviceInfo.kt lives in one place.
+ *
+ * 'server' covers the node dashboard's own login (node/public/app.js). /api/auth/sessions filters
+ * those out as cast targets, but /api/auth/devices lists them, so the kind has to exist.
+ */
+const deviceKindOf = ({ device, device_type }) => {
+    if (device_type === 'Node') return 'server';
+    if (device_type === 'TV' || device_type === 'Android TV' || /\btv\b/i.test(device || '')) return 'tv';
+    if (device_type === 'Mobile') return 'mobile';
+    return 'desktop';
+};
 
 // A solo/household deployment doesn't need a full rate-limiting library — just enough
 // friction that scripted password guessing isn't free. Per-IP, in-memory, resets on restart;
@@ -192,23 +212,95 @@ router.get('/api/auth/sessions', verifyToken, async (req, res) => {
             "SELECT token, device, device_type, last_active FROM sessions WHERE username = ? AND last_active > ? AND device_type != 'Node'",
             [req.user.username, Date.now() - 5 * 60 * 1000]
         );
-        // The TV app's two login paths disagree with each other and with web_client's own
-        // getDeviceInfo() on what device_type a TV reports: password login sends the literal
-        // string "Android TV", kunji login sends nothing at all (defaults to 'Web Browser'
-        // here), and an actual TV *browser* sends 'TV'. Normalized once here so every consumer
-        // (the cast-target picker) doesn't have to re-derive this same fuzzy match itself.
-        const sessions = rows.map(s => {
-            const isTv = s.device_type === 'TV' || s.device_type === 'Android TV' || /\btv\b/i.test(s.device || '');
-            return {
-                token: s.token,
-                device: s.device,
-                deviceType: s.device_type,
-                deviceKind: isTv ? 'tv' : (s.device_type === 'Mobile' ? 'mobile' : 'desktop'),
-                lastActive: s.last_active,
-                isCurrent: s.token === currentToken,
-            };
-        });
+        const sessions = rows.map(s => ({
+            token: s.token,
+            device: s.device,
+            deviceType: s.device_type,
+            deviceKind: deviceKindOf(s),
+            lastActive: s.last_active,
+            isCurrent: s.token === currentToken,
+        }));
         res.json({ sessions });
+    } catch (e) { sendServerError(res, e); }
+});
+
+/**
+ * Every session on the caller's account — the "which of my devices are signed in" list behind
+ * Settings, and the only place a normal (non-admin) user can see or revoke one.
+ *
+ * Three deliberate inversions of /api/auth/sessions directly above, because the two lists answer
+ * different questions:
+ *
+ *  - No activity filter. That route's 5 minutes is the same value as remote.js's
+ *    COMMAND_MAX_AGE_MS: it means "can this target still receive a cast before it expires", not
+ *    "is this signed in". Session tokens never expire (middleware.js only checks the row exists),
+ *    so every row here is a live credential and hiding the idle ones would be the dishonest
+ *    answer to "what has access to my account".
+ *  - No device_type != 'Node' filter. Excluding the node dashboard is right for a cast target (no
+ *    player, nothing polling for commands) and wrong for a security list, where it is exactly the
+ *    kind of standing credential worth showing.
+ *  - Returns `id`, and deliberately NO `token`. See sessionIdFor in cryptoHelpers.js: this
+ *    response is rendered on an always-on settings page, so it must not carry credentials.
+ */
+router.get('/api/auth/devices', verifyToken, async (req, res) => {
+    if (!db) await initDB();
+    try {
+        const currentToken = req.headers.authorization?.split('Bearer ')[1] || req.query.token;
+        const rows = await db.all(
+            `SELECT token, device, device_type, ip, location, last_active FROM sessions
+             WHERE username = ? ORDER BY last_active DESC`,
+            [req.user.username]
+        );
+        const devices = rows.map(s => ({
+            id: sessionIdFor(s.token),
+            device: s.device,
+            deviceType: s.device_type,
+            deviceKind: deviceKindOf(s),
+            ip: s.ip,
+            location: s.location,
+            lastActive: s.last_active,
+            isCurrent: s.token === currentToken,
+        }));
+        res.json({ devices });
+    } catch (e) { sendServerError(res, e); }
+});
+
+/**
+ * Sign one of the caller's own devices out, by the opaque id from /api/auth/devices.
+ *
+ * The ownership check IS the username-scoped scan: an id belonging to someone else simply never
+ * matches, so there is no 403 branch and an unknown or foreign id gets the same 404 — the response
+ * can't be used to confirm that another account's session exists. Same reasoning shareResolver.js
+ * documents for collapsing revoked/expired/nonexistent shares into one answer.
+ *
+ * Known limitation, deliberately not papered over: this does not stop playback already running.
+ * A stream token (state.js STREAM_TOKENS) is an in-memory grant with no back-reference to the
+ * session that minted it, and middleware.js checks it *before* the sessions table, so a revoked
+ * device keeps whatever it already started for up to the 6-hour TTL. The only lever would be
+ * purging every stream token for the username, which would also kill the revoking user's own
+ * playback.
+ */
+router.delete('/api/auth/devices/:id', verifyToken, async (req, res) => {
+    if (!db) await initDB();
+    try {
+        const currentToken = req.headers.authorization?.split('Bearer ')[1] || req.query.token;
+        const rows = await db.all(
+            "SELECT token, device FROM sessions WHERE username = ?",
+            [req.user.username]
+        );
+        const match = rows.find(s => sessionIdFor(s.token) === req.params.id);
+        if (!match) return res.status(404).json({ error: "Device not found" });
+
+        await db.run("DELETE FROM sessions WHERE token = ?", match.token);
+        // Clipped because POST /api/auth/login stores `device` straight from the request body with
+        // no length limit, and this string lands in the admin activity log verbatim.
+        const label = (match.device || 'Unknown Device').slice(0, 80);
+        const self = match.token === currentToken ? ' (this device)' : '';
+        // A distinct action rather than reusing LOGOUT, so an admin reading the log can tell a
+        // normal sign-out from a device being revoked. Neither the token nor the id is logged.
+        await logActivity(req.user.username, "SESSION_REVOKE", `Signed out ${label}${self}`, req.ip);
+
+        res.json({ success: true });
     } catch (e) { sendServerError(res, e); }
 });
 

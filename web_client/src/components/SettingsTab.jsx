@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { User, Lock, KeyRound, Server, Plus, ExternalLink, Share2, Film, Tv, Trash2, Copy, Check } from 'lucide-react';
 import ActivityLog from './ActivityLog';
 import AddNodeModal from './AddNodeModal';
+import MyDevices from './MyDevices';
 import CredentialsModal from './CredentialsModal';
 import NodeDetailModal from './NodeDetailModal';
 import UserManagement from './UserManagement';
@@ -17,7 +18,7 @@ const isAdmin = (role) => role === 'admin' || role === 'super_admin';
 // Everyone gets the Account card (moved out of the header dropdown, which used to be the only
 // way to reach change-password/Kunji-link). Admins additionally get User Management, Nodes,
 // and Activity Log — previously all three lived inside DashboardTab.jsx.
-const SettingsTab = ({ token, serverUrl, username, role }) => {
+const SettingsTab = ({ token, serverUrl, username, role, onLogout }) => {
     const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
     const [isKunjiModalOpen, setIsKunjiModalOpen] = useState(false);
     const [kunjiLinked, setKunjiLinked] = useState(false);
@@ -211,6 +212,10 @@ const SettingsTab = ({ token, serverUrl, username, role }) => {
                     </div>
                 )}
             </div>
+
+            {/* MY DEVICES — every logged-in user, like Account and My Shares above. The only place
+                a non-admin can see or revoke their own sign-ins. */}
+            <MyDevices token={token} serverUrl={serverUrl} onLogout={onLogout} />
 
             {isAdmin(role) && (
                 <>
