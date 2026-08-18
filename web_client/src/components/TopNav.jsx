@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Home, LayoutDashboard, Compass, LogOut, User, UploadCloud, Film, Tv, Settings as SettingsIcon, Download as DownloadIcon } from 'lucide-react';
 import ServerStats from './ServerStats';
 import Button from './ui/Button';
@@ -16,6 +16,34 @@ const TABS = [
 // Discovery/Settings/Dashboard, not just account actions).
 const TopNav = ({ username, role, activeTab, setActiveTab, setSelectedSeries, token, serverUrl, onUploadClick, onLogout }) => {
     const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
+    const userMenuRef = useRef(null);
+
+    // Closed from document-level listeners rather than a full-screen overlay div, which is what
+    // this used to do. That overlay was `fixed inset-0` *inside* this nav, and the nav carries
+    // backdrop-blur — backdrop-filter establishes a containing block for fixed descendants, so
+    // inset-0 resolved against the header strip instead of the viewport. The overlay therefore
+    // only covered the header, and a click anywhere in the page below it never closed the menu.
+    //
+    // Listening on the document also fixes a second thing the overlay got wrong even where it
+    // did cover: it swallowed the click, so dismissing the menu and pressing the button you were
+    // aiming at took two clicks. mousedown just closes and lets the event continue.
+    useEffect(() => {
+        if (!isUserMenuOpen) return;
+
+        const onPointerDown = (e) => {
+            if (!userMenuRef.current?.contains(e.target)) setIsUserMenuOpen(false);
+        };
+        const onKeyDown = (e) => { if (e.key === 'Escape') setIsUserMenuOpen(false); };
+
+        document.addEventListener('mousedown', onPointerDown);
+        document.addEventListener('touchstart', onPointerDown);
+        document.addEventListener('keydown', onKeyDown);
+        return () => {
+            document.removeEventListener('mousedown', onPointerDown);
+            document.removeEventListener('touchstart', onPointerDown);
+            document.removeEventListener('keydown', onKeyDown);
+        };
+    }, [isUserMenuOpen]);
 
     const menuItems = [
         { id: 'discovery', label: 'Discovery', Icon: Compass },
@@ -81,7 +109,7 @@ const TopNav = ({ username, role, activeTab, setActiveTab, setSelectedSeries, to
                     </Button>
 
                     {/* USER DROPDOWN MENU */}
-                    <div className="relative">
+                    <div className="relative" ref={userMenuRef}>
                         {/* User Icon Button — soft accent tint while open, same "this is the
                             active thing" language as the nav tabs, instead of a full white/black
                             invert. */}
@@ -147,14 +175,6 @@ const TopNav = ({ username, role, activeTab, setActiveTab, setSelectedSeries, to
                             </div>
                         )}
                     </div>
-
-                    {/* Overlay to close menu when clicking outside */}
-                    {isUserMenuOpen && (
-                        <div
-                            className="fixed inset-0 z-40 bg-transparent"
-                            onClick={() => setIsUserMenuOpen(false)}
-                        />
-                    )}
                 </div>
         </nav>
     );
