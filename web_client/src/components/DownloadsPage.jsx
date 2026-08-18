@@ -23,7 +23,12 @@ const DownloadsPage = () => (
                     </div>
                     <div>
                         <h3 className="font-bold">Android TV App</h3>
-                        <p className="text-sm text-muted">StreamPi Client v1.0.apk</p>
+                        {/* No version number here on purpose. It used to read "v1.0.apk", hardcoded,
+                            and stayed there while the app shipped v1.1 (versionCode 16) — a version
+                            string nothing updates is worse than none, because it looks authoritative.
+                            The real version lives in StreamPiTV/version.properties, and the APK is
+                            replaced in place by deploy-apk.sh, so there is nothing here to sync to. */}
+                        <p className="text-sm text-muted">Sideload onto Android TV or Fire TV</p>
                     </div>
                 </div>
                 <a
