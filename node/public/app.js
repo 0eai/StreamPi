@@ -493,8 +493,12 @@ function renderLocationsList() {
     });
 }
 
-document.getElementById('cfg-add-location-btn').addEventListener('click', () => {
-    const newPath = prompt('Absolute path for the new storage location:');
+document.getElementById('cfg-add-location-btn').addEventListener('click', async () => {
+    const newPath = await Dialogs.prompt({
+        title: 'Add storage location',
+        label: 'Absolute path',
+        placeholder: '/mnt/disk2/streampi',
+    });
     if (!newPath) return;
     currentLocations.push({ id: generateLocationId(), path: newPath, limitBytes: DEFAULT_STORAGE_LIMIT_GB * (1024 ** 3), diskCapacityBytes: 0 });
     renderLocationsList();
@@ -525,7 +529,7 @@ document.getElementById('cfg-apiKey-toggle').addEventListener('click', (e) => {
 document.getElementById('cfg-apiKey-copy').addEventListener('click', (e) => {
     copyToClipboard(document.getElementById('cfg-apiKey').value)
         .then(() => { const btn = e.target; const old = btn.textContent; btn.textContent = 'Copied!'; setTimeout(() => btn.textContent = old, 1500); })
-        .catch(() => alert("Couldn't copy automatically — select the text and copy it manually."));
+        .catch(() => Toast.error("Couldn't copy automatically — select the text and copy it manually."));
 });
 
 document.getElementById('save-settings-btn').addEventListener('click', async () => {
@@ -550,7 +554,7 @@ document.getElementById('save-settings-btn').addEventListener('click', async () 
             renderMigrationsStatus(result.migrationsStarted.map(m => ({ filename: `${m.fromPath} → ${m.toPath}`, percent: 0, status: 'starting' })));
         }
         await loadConfig();
-    } catch (e) { alert('Save failed: ' + e.message); }
+    } catch (e) { Toast.error('Save failed: ' + e.message); }
 });
 
 document.getElementById('save-restart-btn').addEventListener('click', async () => {
@@ -558,7 +562,12 @@ document.getElementById('save-restart-btn').addEventListener('click', async () =
     if (document.getElementById('cfg-role-transcoder').checked) roles.push('transcoder');
     if (document.getElementById('cfg-role-nas').checked) roles.push('nas');
 
-    if (!confirm('This will restart the node process and can desync it from the main server\'s dashboard if roles/identity changed. Continue?')) return;
+    if (!await Dialogs.confirm({
+        title: 'Restart this node?',
+        message: 'The node process will restart. If its roles or identity changed it can desync from the main server\'s dashboard until it re-registers.',
+        confirmLabel: 'Save & Restart',
+        danger: true,
+    })) return;
 
     const body = {
         id: document.getElementById('cfg-id').value.trim(),
@@ -581,9 +590,9 @@ document.getElementById('save-restart-btn').addEventListener('click', async () =
             if (statsInterval) clearInterval(statsInterval);
             if (extrasInterval) clearInterval(extrasInterval);
         } else {
-            alert('Saved (no restart needed).');
+            Toast.success('Saved — no restart needed.');
         }
-    } catch (e) { alert('Save failed: ' + e.message); }
+    } catch (e) { Toast.error('Save failed: ' + e.message); }
 });
 
 // --- boot ---

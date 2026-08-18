@@ -272,3 +272,91 @@ input[type="range"]::-moz-range-track {
 .status-badge { font-size: 0.65rem; font-weight: 700; text-transform: uppercase; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
 .status-completed { background: rgba(34,197,94,0.15); color: var(--green); }
 .status-failed { background: rgba(239,68,68,0.15); color: var(--red); }
+
+/* --- Dialogs & toasts (dialogs.js) ---------------------------------------- */
+/* The dashboard's own confirm/prompt/notice UI, replacing window.confirm/alert/prompt. Sized and
+   coloured from the tokens above so it reads as part of the page rather than the browser. */
+.dlg-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.8);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    z-index: 100;
+}
+.dlg-panel {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    width: 100%;
+    max-width: 420px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+}
+.dlg-title { margin: 0 0 10px 0; font-size: 1rem; }
+.dlg-message { margin: 0 0 4px 0; color: var(--muted-light); font-size: 0.85rem; line-height: 1.5; white-space: pre-line; }
+.dlg-label { display: block; margin: 12px 0 6px; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+.dlg-input {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 9px 12px;
+    color: var(--text);
+    font-family: ui-monospace, monospace;
+    font-size: 0.85rem;
+}
+.dlg-input:focus { outline: none; border-color: var(--blue); }
+.dlg-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+/* .btn-primary/.btn-danger are shaped for the full-width login form (width:100%, a top margin).
+   In an action row that stretches one button across the panel, so reset them to fit the row and
+   match .btn-ghost's smaller metrics. */
+.dlg-actions > button {
+    width: auto;
+    margin-top: 0;
+    padding: 7px 14px;
+    border-radius: 6px;
+    font-size: 0.78rem;
+}
+
+/* Above .dlg-overlay so a failure raised while a dialog is open is still visible. */
+.toast-host {
+    position: fixed;
+    bottom: 16px;
+    right: 16px;
+    z-index: 110;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: min(22rem, calc(100vw - 32px));
+    pointer-events: none;
+}
+.toast {
+    pointer-events: auto;
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-left-width: 3px;
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 0.85rem;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+}
+.toast span { flex: 1; word-break: break-word; }
+.toast-error { border-left-color: var(--red); }
+.toast-success { border-left-color: var(--green); }
+.toast-info { border-left-color: var(--blue); }
+.toast-close {
+    background: none;
+    border: none;
+    color: var(--muted);
+    font-size: 1.1rem;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0;
+}
+.toast-close:hover { color: var(--text); }

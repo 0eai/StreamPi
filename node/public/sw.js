@@ -1,12 +1,13 @@
 // Bump this whenever a shell asset below changes — activate() evicts every older cache,
 // so this is the only thing that invalidates a stale cached copy of style.css/app.js/etc.
-const CACHE_NAME = 'streampi-node-shell-v1';
+const CACHE_NAME = 'streampi-node-shell-v2';
 
 const SHELL_ASSETS = [
     '/',
     '/index.html',
     '/style.css',
     '/app.js',
+    '/dialogs.js',
     '/manifest.json',
     '/icons/icon-192.png',
     '/icons/icon-512.png'
