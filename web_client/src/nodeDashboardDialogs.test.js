@@ -11,9 +11,21 @@
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import fs from 'node:fs';
+import path from 'node:path';
 
-// Repo-relative so this resolves in either checkout.
-const SRC = new URL('../../node/public/dialogs.js', import.meta.url);
+// Located by walking up from the cwd rather than from import.meta.url: Vite rewrites that to a
+// non-file scheme, so `new URL(rel, import.meta.url)` cannot be read. This also works whether
+// vitest is invoked from web_client/ or from the repo root.
+const findUp = (rel) => {
+    let dir = process.cwd();
+    for (let i = 0; i < 5; i += 1) {
+        const candidate = path.join(dir, rel);
+        if (fs.existsSync(candidate)) return candidate;
+        dir = path.dirname(dir);
+    }
+    throw new Error(`could not locate ${rel} from ${process.cwd()}`);
+};
+const SRC = findUp('node/public/dialogs.js');
 const load = () => {
     document.body.innerHTML = '';
     delete window.Dialogs;

@@ -33,4 +33,10 @@ export default [
             'react-refresh/only-export-components': 'off',
         },
     },
+    {
+        // Tests run under vitest in Node, so they can use node globals (process, etc.) that the
+        // browser-only set above deliberately excludes for app code.
+        files: ['**/*.test.{js,jsx}'],
+        languageOptions: { globals: { ...globals.node } },
+    },
 ];
