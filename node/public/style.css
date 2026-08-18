@@ -92,6 +92,10 @@ button { font-family: inherit; cursor: pointer; }
 .btn-ghost:hover { background: #2a3646; color: #fff; }
 .logout { margin-left: auto; }
 
+/* The claim view leads with an explanation rather than a bare field, so it needs room the other
+   gate views (which open straight onto inputs) don't. */
+.claim-lead { margin-bottom: 14px; text-align: left; line-height: 1.5; }
+
 /* --- Shell --- */
 header {
     background: var(--card);

@@ -85,7 +85,14 @@ async function api(path, options = {}) {
         ...options,
         headers: { 'Content-Type': 'application/json', 'Authorization': authHeader, ...(options.headers || {}) }
     });
-    if (res.status === 403 || res.status === 401) throw new Error('UNAUTHORIZED');
+    // The message stays 'UNAUTHORIZED' because callers switch on it, but the status rides along: the
+    // gate has to tell a dead token (401) from an account that simply isn't this node's owner (403),
+    // since only the second one can be fixed by claiming.
+    if (res.status === 403 || res.status === 401) {
+        const err = new Error('UNAUTHORIZED');
+        err.status = res.status;
+        throw err;
+    }
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || res.statusText);
     return data;
@@ -110,15 +117,30 @@ const gatePasswordView = document.getElementById('gate-password-view');
 const gateApikeyView = document.getElementById('gate-apikey-view');
 const gateUsernameInput = document.getElementById('gate-username');
 const gatePasswordInput = document.getElementById('gate-password');
+const gateClaimView = document.getElementById('gate-claim-view');
+const gateClaimKeyInput = document.getElementById('gate-claim-key');
 
 // Kunji is tried first automatically, password is the fallback, API key is the
-// last-resort/local option — these three views are mutually exclusive steps down
-// that ladder, not simultaneous choices.
+// last-resort/local option — these views are mutually exclusive steps down that
+// ladder, not simultaneous choices. 'claim' is off to the side: it's only reached
+// when an account signed in fine but doesn't own this node yet.
 function showGateView(view) {
     gateKunjiView.classList.toggle('hidden', view !== 'kunji');
     gatePasswordView.classList.toggle('hidden', view !== 'password');
     gateApikeyView.classList.toggle('hidden', view !== 'apikey');
-    gateError.classList.add('hidden');
+    gateClaimView.classList.toggle('hidden', view !== 'claim');
+    gateError.classList.add('hidden');   // callers that want a message must set it after this
+}
+
+/** The token that just authenticated but hit a node it doesn't own — held for the claim call. */
+let claimCandidateToken = '';
+
+function showClaimView(token) {
+    claimCandidateToken = token;
+    resetKunjiWidget();          // or the widget keeps polling inside a now-hidden container
+    showGateView('claim');
+    gateClaimKeyInput.value = '';
+    gateClaimKeyInput.focus();
 }
 
 function resetKunjiWidget() {
@@ -172,11 +194,75 @@ async function tryConnectAccount(token) {
         localStorage.removeItem(ACCOUNT_TOKEN_STORAGE);
         localStorage.removeItem(AUTH_MODE_STORAGE);
         authMode = 'apikey';
+
+        // Three outcomes, not one. This used to report all of them as "session expired or not the
+        // owner", which was both vague and, for the third case, wrong — an unreachable node (the main
+        // server answers 404 "Node not reachable" when it isn't in its live pools) sent people looking
+        // for an auth problem that didn't exist.
+        if (e.status === 403) {
+            // The token is good; it just doesn't own this node. That's the one failure a claim fixes,
+            // and `token` is still in hand here because it was never persisted.
+            showClaimView(token);
+            gateError.textContent = 'That account does not own this node yet.';
+            gateError.classList.remove('hidden');
+            return false;
+        }
+
         resetKunjiWidget();
         showGateView('password');
-        gateError.textContent = 'Session expired or this account is not this node\'s owner — please sign in again.';
+        gateError.textContent = e.status === 401
+            ? 'Session expired — please sign in again.'
+            : e.message;
         gateError.classList.remove('hidden');
         return false;
+    }
+}
+
+/**
+ * Claims this node for the account that just signed in, proving control of the machine with its API
+ * key. Goes straight to the main server rather than through api(): that helper only knows this node's
+ * own paths and their proxy equivalents, and claiming is neither.
+ */
+async function submitClaim() {
+    const key = gateClaimKeyInput.value.trim();
+    if (!key) {
+        gateError.textContent = 'Enter this node\'s API key.';
+        gateError.classList.remove('hidden');
+        return;
+    }
+    if (!mainServerUrl || !selfId) {
+        gateError.textContent = 'Could not reach the main server. Try signing in again.';
+        gateError.classList.remove('hidden');
+        return;
+    }
+
+    const btn = document.getElementById('gate-claim-submit');
+    btn.disabled = true;
+    btn.textContent = 'Claiming…';
+    try {
+        const res = await fetch(`${mainServerUrl}/api/node-owner/${selfId}/claim`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${claimCandidateToken}` },
+            // In the body, never the query string: query strings end up in server logs, and this is
+            // the node's root credential.
+            body: JSON.stringify({ apiKey: key })
+        });
+        // Parse before checking ok. A server that hasn't been restarted yet has no route for this, and
+        // its catch-all only handles GET — so the POST falls through to Express's own 404, which is
+        // HTML. Reading that as JSON would throw over the top of the real error.
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            gateError.textContent = data.error || `Claim failed (${res.status}).`;
+            gateError.classList.remove('hidden');
+            return;
+        }
+        await tryConnectAccount(claimCandidateToken);
+    } catch (e) {
+        gateError.textContent = 'Claim failed: ' + e.message;
+        gateError.classList.remove('hidden');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Claim this node';
     }
 }
 
@@ -208,10 +294,17 @@ gateKeyInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') tryConn
 document.getElementById('gate-password-submit').addEventListener('click', () => tryConnectPassword(gateUsernameInput.value.trim(), gatePasswordInput.value));
 gatePasswordInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') tryConnectPassword(gateUsernameInput.value.trim(), gatePasswordInput.value); });
 
+document.getElementById('gate-claim-submit').addEventListener('click', () => submitClaim());
+gateClaimKeyInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') submitClaim(); });
+
 document.getElementById('gate-goto-password-btn').addEventListener('click', () => showGateView('password'));
 document.getElementById('gate-goto-apikey-btn').addEventListener('click', () => showGateView('apikey'));
 document.getElementById('gate-back-to-password-btn').addEventListener('click', () => showGateView('password'));
 document.getElementById('gate-goto-kunji-btn').addEventListener('click', () => startKunjiLogin());
+// Ways out of the claim view. Without these a visitor whose account doesn't own the node is stranded:
+// the logout button lives in the shell, which is still hidden at this point.
+document.getElementById('gate-claim-back-btn').addEventListener('click', () => { claimCandidateToken = ''; showGateView('password'); });
+document.getElementById('gate-claim-apikey-btn').addEventListener('click', () => { claimCandidateToken = ''; showGateView('apikey'); });
 
 let kunjiScriptLoaded = false;
 async function loadKunjiScript() {

@@ -40,6 +40,20 @@
                 <button id="gate-back-to-password-btn" class="link-btn" type="button">← Use password instead</button>
             </div>
 
+            <!-- Shown only when an account signed in successfully but isn't this node's owner. Signing
+                 in is not enough to claim it — this page is served without authentication, so anyone on
+                 the network can reach it. The API key is the proof that you run this machine. -->
+            <div id="gate-claim-view" class="hidden">
+                <!-- Deliberately doesn't claim the node is unowned: a 403 from the proxy means only
+                     "not yours", which covers both an unclaimed node and one someone else holds. The
+                     server distinguishes them, and says so, when the claim is actually attempted. -->
+                <p class="muted claim-lead">If this machine is yours, enter its API key to claim it for your account. You can find it in the node's <code>node_config.json</code>.</p>
+                <input id="gate-claim-key" type="password" placeholder="API Key" autocomplete="off" />
+                <button id="gate-claim-submit" class="btn-primary" type="button">Claim this node</button>
+                <button id="gate-claim-back-btn" class="link-btn" type="button">← Sign in as a different account</button>
+                <button id="gate-claim-apikey-btn" class="link-btn" type="button">Use the API key directly instead →</button>
+            </div>
+
             <p id="gate-error" class="error hidden"></p>
         </div>
     </div>
