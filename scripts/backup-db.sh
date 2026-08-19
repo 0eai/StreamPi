@@ -82,6 +82,20 @@ if [ "$CHECK" != "ok" ]; then
     exit 1
 fi
 
+# Verifying the copy meant opening it, and the copy inherits journal_mode=WAL — so that open left a
+# -wal and a -shm beside it. They carry nothing (the write that produced them was the checkpoint on
+# close), but leaving them makes a restore ambiguous about which files are actually the backup.
+# Removed only when the WAL is genuinely empty; a non-empty one would mean unflushed data.
+for side in "$OUT-wal" "$OUT-shm"; do
+    if [ -f "$side" ]; then
+        if [ "$side" = "$OUT-wal" ] && [ -s "$side" ]; then
+            echo "NOTE: $side is not empty — keeping it. Restore this file alongside the backup." >&2
+        else
+            rm -f "$side"
+        fi
+    fi
+done
+
 echo ""
 echo "✅ $OUT"
 echo "   $(du -h "$OUT" | cut -f1) · integrity_check=ok · $COUNTS"

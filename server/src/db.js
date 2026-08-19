@@ -96,6 +96,86 @@ export const initDB = async () => {
         await db.run("CREATE INDEX IF NOT EXISTS idx_shares_series ON shares(series_name, owner_username)");
         await db.run("CREATE INDEX IF NOT EXISTS idx_shares_owner ON shares(owner_username)");
 
+        // --- File sharing: its own tables, sharing nothing with `media` or `shares` ---
+        //
+        // A folder and a file are one row apart (is_folder), because everything that acts on them —
+        // listing, moving, sharing, expiring, quota — treats them the same and only the leaf/branch
+        // distinction differs. Folders exist nowhere on disk; see FILES_ROOT in paths.js.
+        //
+        // Two things about the tree are worth reading before changing it:
+        //
+        // 1. Every user gets a real root row (parent_id IS NULL, name ''). The obvious alternative —
+        //    nullable parent_id for top-level items — silently breaks UNIQUE(parent_id, name),
+        //    because SQLite treats NULLs as distinct in a unique index, so the entire top level
+        //    would accept duplicates.
+        // 2. path_ids denormalizes the ancestor chain as '/rootid/aid/bid/'. Ids, never names, so a
+        //    rename stays a single UPDATE. It buys the ancestor set with no query at all (a string
+        //    split, which every access check needs), subtree enumeration as an indexed prefix
+        //    LIKE, and — most importantly — makes a cycle impossible to create: a move is rejected
+        //    when the destination's path_ids starts with the moved node's. With a bare parent_id, a
+        //    user could make a folder its own ancestor and the walk would loop rather than error,
+        //    and there are no transactions anywhere in this codebase to make check-then-update safe.
+        await db.exec(`
+            CREATE TABLE IF NOT EXISTS file_nodes (
+                id TEXT PRIMARY KEY,
+                owner_username TEXT NOT NULL,
+                parent_id TEXT,
+                name TEXT NOT NULL,
+                is_folder INTEGER NOT NULL DEFAULT 0,
+                storage_name TEXT,
+                size INTEGER NOT NULL DEFAULT 0,
+                mime TEXT,
+                path_ids TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                expires_at TEXT,
+                deleted_at TEXT,
+                UNIQUE (parent_id, name)
+            );
+        `);
+        await db.run("CREATE INDEX IF NOT EXISTS idx_file_nodes_parent ON file_nodes(parent_id)");
+        await db.run("CREATE INDEX IF NOT EXISTS idx_file_nodes_owner ON file_nodes(owner_username)");
+        await db.run("CREATE INDEX IF NOT EXISTS idx_file_nodes_path ON file_nodes(path_ids)");
+        await db.run("CREATE INDEX IF NOT EXISTS idx_file_nodes_expires ON file_nodes(expires_at)");
+        await db.run("CREATE INDEX IF NOT EXISTS idx_file_nodes_deleted ON file_nodes(deleted_at)");
+        await db.run("CREATE INDEX IF NOT EXISTS idx_file_nodes_storage ON file_nodes(storage_name)");
+
+        // One table for both kinds of share, discriminated by `kind`, so expiry, revocation and
+        // access counting are written once rather than twice.
+        //
+        // The CHECK is what makes that safe rather than merely tidy: with token guaranteed NULL on
+        // every 'user' row, a token lookup cannot match a user grant even if some future resolver
+        // forgets `AND kind = 'link'`, because NULL = 'abc' is NULL. It has to be right in this
+        // first CREATE — SQLite's ALTER TABLE cannot add a CHECK later, and CREATE TABLE IF NOT
+        // EXISTS never re-runs on a database that already has the table.
+        //
+        // recipient_user_id, never a username: users.id is AUTOINCREMENT so ids are never reused,
+        // whereas a username is freed by a delete (and db.js purges rejected accounts on every
+        // boot), so a stranger re-registering the name would inherit every grant made to the old one.
+        await db.exec(`
+            CREATE TABLE IF NOT EXISTS file_shares (
+                id TEXT PRIMARY KEY,
+                node_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                token TEXT UNIQUE,
+                recipient_user_id INTEGER,
+                owner_username TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT,
+                revoked INTEGER NOT NULL DEFAULT 0,
+                open_count INTEGER NOT NULL DEFAULT 0,
+                last_accessed_at TEXT,
+                CHECK (
+                    (kind = 'link' AND token IS NOT NULL AND recipient_user_id IS NULL)
+                    OR
+                    (kind = 'user' AND token IS NULL AND recipient_user_id IS NOT NULL)
+                )
+            );
+        `);
+        await db.run("CREATE INDEX IF NOT EXISTS idx_file_shares_node ON file_shares(node_id)");
+        await db.run("CREATE INDEX IF NOT EXISTS idx_file_shares_recipient ON file_shares(recipient_user_id)");
+        await db.run("CREATE INDEX IF NOT EXISTS idx_file_shares_owner ON file_shares(owner_username)");
+
         // "Play on device X" commands, sent by one of a user's own logged-in sessions and
         // picked up by another — a lightweight polled queue, same shape as telegram_files'
         // status column (queued/downloading/...), rather than anything push/WebSocket-based

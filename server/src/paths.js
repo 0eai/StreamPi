@@ -18,6 +18,31 @@ export const EXTERNAL_ROOT = path.join(USER_HOME, 'StreamMedia_External');
 export const PRIVATE_ROOT = path.join(USER_HOME, 'StreamMedia_Private');
 if (!existsSync(PRIVATE_ROOT)) mkdirSync(PRIVATE_ROOT, { recursive: true });
 
+/**
+ * Uploaded user files — the file-sharing subsystem, deliberately its own tree beside StreamMedia*
+ * rather than inside it, so the library scanner (which only walks MEDIA_ROOT and EXTERNAL_ROOT)
+ * cannot see it and the media pipeline cannot touch it.
+ *
+ * Nothing user-supplied is ever a path segment under here. Names, folders and ownership live in the
+ * database; on disk a file is only its opaque storage name. That is what makes path traversal
+ * structurally impossible instead of filtered — worth stating because the obvious alternative, a
+ * per-owner directory, is a real hole: POST /api/auth/register validates the username not at all,
+ * and safeFolder() in routes/media.js does not strip dots, so a user named ".." would land writes
+ * in server_data itself.
+ */
+export const FILES_ROOT = path.join(USER_HOME, 'StreamFiles');
+if (!existsSync(FILES_ROOT)) mkdirSync(FILES_ROOT, { recursive: true });
+
+/**
+ * Where one stored file lives: sharded on the first two characters of its own name.
+ *
+ * The shard exists because this is one flat namespace for every user's files, and an ext4 directory
+ * on an SD card gets slow to enumerate well before the file count gets interesting — which matters
+ * to the orphan reaper, the only thing that ever lists these directories.
+ */
+export const storagePathFor = (storageName) =>
+    path.join(FILES_ROOT, String(storageName).slice(0, 2), String(storageName));
+
 export const TEMP_DIR = path.join(USER_HOME, 'temp_uploads');
 export const HIDDEN_DATA_FOLDER = path.join(MEDIA_ROOT, '.stream_db');
 export const THUMB_FOLDER = path.join(HIDDEN_DATA_FOLDER, 'thumbs');
