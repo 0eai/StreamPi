@@ -4,7 +4,7 @@ import path from 'path';
 import { db, initDB, logActivity } from '../db.js';
 import { verifyToken } from '../middleware.js';
 import { resolveShare, touchShare } from '../shareResolver.js';
-import { expiryFromHours, isShareLive, LIVE_SHARE_SQL } from '../shareExpiry.js';
+import { expiryFromHours, isShareLive, liveShareSql } from '../shareExpiry.js';
 import { streamMediaFile, downloadMediaFile } from '../streamCore.js';
 import { sendServerError } from '../logger.js';
 
@@ -71,7 +71,7 @@ router.get('/api/share/mine', verifyToken, async (req, res) => {
         // stopped working keeps listing here as though it were live — the one read of `shares`
         // that needed changing when expires_at started being populated.
         const rows = await db.all(
-            `SELECT * FROM shares WHERE owner_username = ? AND ${LIVE_SHARE_SQL} ORDER BY created_at DESC`,
+            `SELECT * FROM shares WHERE owner_username = ? AND ${liveShareSql()} ORDER BY created_at DESC`,
             [req.user.username, new Date().toISOString()]
         );
 

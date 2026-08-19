@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isShareLive, expiryFromHours, LIVE_SHARE_SQL, MAX_EXPIRY_HOURS } from './shareExpiry.js';
+import { isShareLive, expiryFromHours, liveShareSql, MAX_EXPIRY_HOURS } from './shareExpiry.js';
 
 const NOW = Date.parse('2026-08-19T12:00:00.000Z');
 const row = (over = {}) => ({ revoked: 0, expires_at: null, ...over });
@@ -37,7 +37,7 @@ describe('expiryFromHours', () => {
     });
 
     it('returns a canonical ISO-8601-with-Z string', () => {
-        // Load-bearing: LIVE_SHARE_SQL compares expires_at lexicographically in SQL while
+        // Load-bearing: liveShareSql compares expires_at lexicographically in SQL while
         // isShareLive parses it as a date, and those only agree for this exact format.
         const { expiresAt } = expiryFromHours(24, NOW);
         expect(expiresAt).toBe('2026-08-20T12:00:00.000Z');
@@ -60,10 +60,18 @@ describe('expiryFromHours', () => {
     });
 });
 
-describe('LIVE_SHARE_SQL', () => {
+describe('liveShareSql', () => {
     it('covers both revoked and expired, and takes exactly one bind parameter', () => {
-        expect(LIVE_SHARE_SQL).toContain('revoked = 0');
-        expect(LIVE_SHARE_SQL).toContain('expires_at IS NULL');
-        expect(LIVE_SHARE_SQL.match(/\?/g)).toHaveLength(1);
+        expect(liveShareSql()).toContain('revoked = 0');
+        expect(liveShareSql()).toContain('expires_at IS NULL');
+        expect(liveShareSql().match(/\?/g)).toHaveLength(1);
+    });
+
+    it('qualifies every column when given an alias, since a JOIN makes bare names ambiguous', () => {
+        const sql = liveShareSql('s');
+        expect(sql).toBe("s.revoked = 0 AND (s.expires_at IS NULL OR s.expires_at > ?)");
+        // No unqualified leftovers — the failure mode of the string-rewrite this replaced.
+        expect(/(^|[^.\w])revoked\b/.test(sql)).toBe(false);
+        expect(/(^|[^.\w])expires_at\b/.test(sql)).toBe(false);
     });
 });

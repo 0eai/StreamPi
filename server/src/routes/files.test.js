@@ -303,3 +303,188 @@ describe('GET /api/users/shareable', () => {
         expect(r.body.users.map((u) => u.username)).toEqual(['ashutosh']);
     });
 });
+
+// --- Sharing ------------------------------------------------------------------------------------
+
+const RANJAN = 1;
+const ASHUTOSH = 2;
+const PENDING = 3;
+
+const asAshutosh = () => { currentUser = { id: ASHUTOSH, username: 'ashutosh', role: 'user' }; };
+
+describe('link shares', () => {
+    it('creates a link and resolves it without any credential', async () => {
+        const f = (await uploadFile('report.pdf', 'bytes')).body.item;
+        const made = await api('POST', `/api/files/${f.id}/share`, { kind: 'link' });
+        expect(made.status).toBe(200);
+
+        // No user is set for the public routes — they carry no verifyToken at all.
+        const info = await api('GET', `/api/files/share/${made.body.token}/info`);
+        expect(info.status).toBe(200);
+        expect(info.body.current.name).toBe('report.pdf');
+    });
+
+    it('lists a shared folder and lets ?node= walk into it', async () => {
+        const dir = (await api('POST', '/api/files/folder', { name: 'Docs' })).body.item;
+        const sub = (await api('POST', '/api/files/folder', { parentId: dir.id, name: 'Sub' })).body.item;
+        await uploadFile('inside.txt', 'x', sub.id);
+        const token = (await api('POST', `/api/files/${dir.id}/share`, { kind: 'link' })).body.token;
+
+        const top = await api('GET', `/api/files/share/${token}/info`);
+        expect(top.body.items.map((i) => i.name)).toEqual(['Sub']);
+
+        const deeper = await api('GET', `/api/files/share/${token}/info?node=${sub.id}`);
+        expect(deeper.body.items.map((i) => i.name)).toEqual(['inside.txt']);
+    });
+
+    it('refuses a ?node= that is not inside the share', async () => {
+        // Without this a folder link would be a key to the owner's whole tree — the same hole a
+        // series share closes by refusing a path that is not one of its episodes.
+        const shared = (await api('POST', '/api/files/folder', { name: 'Shared' })).body.item;
+        const secret = (await uploadFile('secret.txt', 'nope')).body.item;
+        const token = (await api('POST', `/api/files/${shared.id}/share`, { kind: 'link' })).body.token;
+
+        const r = await api('GET', `/api/files/share/${token}/info?node=${secret.id}`);
+        expect(r.status).toBe(404);
+        expect(r.body.error).toMatch(/not part of this share/);
+    });
+
+    it('mints byte tokens for the link but never for a folder', async () => {
+        const dir = (await api('POST', '/api/files/folder', { name: 'D' })).body.item;
+        const f = (await uploadFile('in.txt', 'x', dir.id)).body.item;
+        const token = (await api('POST', `/api/files/${dir.id}/share`, { kind: 'link' })).body.token;
+
+        expect((await api('POST', `/api/files/share/${token}/token`, {})).status).toBe(400);
+        const minted = await api('POST', `/api/files/share/${token}/token`, { node: f.id });
+        expect(minted.status).toBe(200);
+        expect(FILE_TOKENS.get(minted.body.token).name).toBe('in.txt');
+    });
+
+    it('counts opens once per landing-page load, not per navigation', async () => {
+        const f = (await uploadFile('a.txt', 'x')).body.item;
+        const token = (await api('POST', `/api/files/${f.id}/share`, { kind: 'link' })).body.token;
+        await api('GET', `/api/files/share/${token}/info`);
+        await api('GET', `/api/files/share/${token}/info`);
+        await api('GET', `/api/files/share/${token}/info?node=${f.id}`); // walking, not opening
+
+        expect((await api('GET', '/api/files/shares/mine')).body.shares[0].opens).toBe(2);
+    });
+
+    it('dies when the shared item is trashed, immediately and not after the grace period', async () => {
+        const f = (await uploadFile('a.txt', 'x')).body.item;
+        const token = (await api('POST', `/api/files/${f.id}/share`, { kind: 'link' })).body.token;
+        await api('DELETE', `/api/files/${f.id}`);
+        expect((await api('GET', `/api/files/share/${token}/info`)).status).toBe(404);
+    });
+
+    it('dies when the owner account is gone, since nobody could revoke it', async () => {
+        const f = (await uploadFile('a.txt', 'x')).body.item;
+        const token = (await api('POST', `/api/files/${f.id}/share`, { kind: 'link' })).body.token;
+        raw.prepare('DELETE FROM users WHERE username = ?').run('ranjan');
+        expect((await api('GET', `/api/files/share/${token}/info`)).status).toBe(404);
+    });
+});
+
+describe('user shares', () => {
+    it('grants several people at once and reports each', async () => {
+        const f = (await uploadFile('a.txt', 'x')).body.item;
+        const r = await api('POST', `/api/files/${f.id}/share`, { kind: 'user', recipientUserIds: [ASHUTOSH, PENDING] });
+        expect(r.body.granted).toBe(1);
+        // A pending account cannot sign in, so granting it would silently do nothing.
+        expect(r.body.results.find((x) => x.recipientUserId === PENDING).ok).toBe(false);
+    });
+
+    it('is idempotent per person rather than piling up duplicate grants', async () => {
+        const f = (await uploadFile('a.txt', 'x')).body.item;
+        await api('POST', `/api/files/${f.id}/share`, { kind: 'user', recipientUserIds: [ASHUTOSH] });
+        await api('POST', `/api/files/${f.id}/share`, { kind: 'user', recipientUserIds: [ASHUTOSH] });
+        expect(raw.prepare("SELECT COUNT(*) c FROM file_shares WHERE kind='user'").get().c).toBe(1);
+    });
+
+    it('shows up for the recipient, and lets them read the bytes but not change anything', async () => {
+        const f = (await uploadFile('shared.txt', 'x')).body.item;
+        await api('POST', `/api/files/${f.id}/share`, { kind: 'user', recipientUserIds: [ASHUTOSH] });
+
+        asAshutosh();
+        const inbox = await api('GET', '/api/files/shared-with-me');
+        expect(inbox.body.items.map((i) => i.name)).toEqual(['shared.txt']);
+
+        // Byte access works through the grant, not ownership.
+        expect((await api('POST', `/api/files/${f.id}/token`)).status).toBe(200);
+
+        // Read-only: every mutation is owner-gated.
+        expect((await api('PATCH', `/api/files/${f.id}`, { name: 'renamed.txt' })).status).toBe(403);
+        expect((await api('DELETE', `/api/files/${f.id}`)).status).toBe(403);
+        expect((await api('POST', `/api/files/${f.id}/share`, { kind: 'link' })).status).toBe(403);
+    });
+
+    it('reaches everything inside a shared folder, including things added later', async () => {
+        const dir = (await api('POST', '/api/files/folder', { name: 'Photos' })).body.item;
+        await api('POST', `/api/files/${dir.id}/share`, { kind: 'user', recipientUserIds: [ASHUTOSH] });
+        // Added after the grant — this is the behaviour the move dialog warns about.
+        const later = (await uploadFile('later.jpg', 'x', dir.id)).body.item;
+
+        asAshutosh();
+        expect((await api('POST', `/api/files/${later.id}/token`)).status).toBe(200);
+        const browsed = await api('GET', `/api/files/shared/${dir.id}`);
+        expect(browsed.body.readOnly).toBe(true);
+        expect(browsed.body.items.map((i) => i.name)).toEqual(['later.jpg']);
+    });
+
+    it('stops working the moment the recipient is no longer approved', async () => {
+        const f = (await uploadFile('a.txt', 'x')).body.item;
+        await api('POST', `/api/files/${f.id}/share`, { kind: 'user', recipientUserIds: [ASHUTOSH] });
+        // verifyToken reads status off the session, so this is the only place it gets noticed.
+        raw.prepare("UPDATE users SET status = 'rejected' WHERE id = ?").run(ASHUTOSH);
+
+        asAshutosh();
+        expect((await api('GET', '/api/files/shared-with-me')).body.items).toEqual([]);
+        expect((await api('POST', `/api/files/${f.id}/token`)).status).toBe(403);
+    });
+
+    it('gives a non-recipient nothing, and says 404 rather than 403 for a browse', async () => {
+        const dir = (await api('POST', '/api/files/folder', { name: 'Private' })).body.item;
+        asAshutosh();
+        // 404 rather than 403: confirming the folder exists is itself a disclosure.
+        expect((await api('GET', `/api/files/shared/${dir.id}`)).status).toBe(404);
+    });
+});
+
+describe('managing shares', () => {
+    it('revokes, and only the owner or a super_admin may', async () => {
+        const f = (await uploadFile('a.txt', 'x')).body.item;
+        const id = (await api('POST', `/api/files/${f.id}/share`, { kind: 'link' })).body.shareId;
+
+        asAshutosh();
+        expect((await api('DELETE', `/api/files/share/${id}`)).status).toBe(403);
+
+        currentUser = { id: 9, username: 'admin', role: 'super_admin' };
+        expect((await api('DELETE', `/api/files/share/${id}`)).status).toBe(200);
+    });
+
+    it('sets and clears expiry, and refuses to revive an expired share', async () => {
+        const f = (await uploadFile('a.txt', 'x')).body.item;
+        const id = (await api('POST', `/api/files/${f.id}/share`, { kind: 'link' })).body.shareId;
+
+        expect((await api('PATCH', `/api/files/share/${id}`, { expiresInHours: 24 })).body.expiresAt).toBeTruthy();
+        expect((await api('PATCH', `/api/files/share/${id}`, { expiresInHours: '' })).body.expiresAt).toBeNull();
+
+        raw.prepare('UPDATE file_shares SET expires_at = ? WHERE id = ?').run('2020-01-01T00:00:00.000Z', id);
+        expect((await api('PATCH', `/api/files/share/${id}`, { expiresInHours: 24 })).status).toBe(404);
+    });
+
+    it('hides expired and revoked shares from the management list', async () => {
+        const f = (await uploadFile('a.txt', 'x')).body.item;
+        const live = (await api('POST', `/api/files/${f.id}/share`, { kind: 'link' })).body.shareId;
+        const dead = (await api('POST', `/api/files/${f.id}/share`, { kind: 'link' })).body.shareId;
+        raw.prepare('UPDATE file_shares SET expires_at = ? WHERE id = ?').run('2020-01-01T00:00:00.000Z', dead);
+
+        const listed = (await api('GET', '/api/files/shares/mine')).body.shares.map((s) => s.id);
+        expect(listed).toEqual([live]);
+    });
+
+    it('rejects an unknown kind', async () => {
+        const f = (await uploadFile('a.txt', 'x')).body.item;
+        expect((await api('POST', `/api/files/${f.id}/share`, { kind: 'public' })).status).toBe(400);
+    });
+});

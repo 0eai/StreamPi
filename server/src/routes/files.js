@@ -9,6 +9,7 @@ import { uploadUserFile } from '../uploadMiddleware.js';
 import { mintFileToken, canRenderInline } from '../fileServer.js';
 import { effectiveExpiry } from '../fileTree.js';
 import * as store from '../fileStore.js';
+import * as shares from '../fileShares.js';
 
 const router = express.Router();
 
@@ -234,13 +235,203 @@ router.post('/api/files/:id/token', verifyToken, async (req, res) => {
         if (!db) await initDB();
         const node = await store.getNode(req.params.id);
         if (!node || node.is_folder) return res.status(404).json({ error: 'File not found' });
-        // Share-based access arrives through the share routes, not here.
-        if (node.owner_username !== req.user.username) return res.status(403).json({ error: 'Access Denied' });
+
+        // Either you own it, or someone granted it to you — directly or by sharing a folder above it.
+        const owns = node.owner_username === req.user.username;
+        if (!owns && !(await shares.grantFor(node, req.user.id))) {
+            return res.status(403).json({ error: 'Access Denied' });
+        }
 
         const token = mintFileToken({
             absPath: storagePathFor(node.storage_name),
             name: node.name,
             size: node.size,
+            inline: req.body?.inline === true,
+        });
+        res.json({ success: true, token, path: `/f/${token}` });
+    } catch (e) { sendServerError(res, e); }
+});
+
+// --- Sharing ------------------------------------------------------------------------------------
+
+/**
+ * Shares one item, either as a public link or with named people.
+ *
+ * Both modes in one endpoint because they are one decision to the person making it — the client's
+ * dialog is a radio button, not two features. `recipientUserIds` may name several, and each becomes
+ * its own grant row so they can be revoked independently.
+ */
+router.post('/api/files/:id/share', verifyToken, async (req, res) => {
+    const { kind, recipientUserIds, expiresInHours } = req.body || {};
+    try {
+        if (!db) await initDB();
+
+        if (kind === 'link') {
+            const r = await shares.createLinkShare({ owner: req.user.username, nodeId: req.params.id, expiresInHours });
+            if (!r.ok) return res.status(r.status).json({ error: r.error });
+            await logActivity(req.user.username, 'FILE_SHARE', `Created a public link for "${r.node.name}"`, req.ip);
+            return res.json({ success: true, token: r.share.token, shareId: r.share.id, expiresAt: r.share.expires_at });
+        }
+
+        if (kind === 'user') {
+            const ids = Array.isArray(recipientUserIds) ? recipientUserIds : [];
+            if (!ids.length) return res.status(400).json({ error: 'Pick at least one person to share with' });
+
+            const results = [];
+            for (const recipientUserId of ids) {
+                const r = await shares.createUserShare({
+                    owner: req.user.username, nodeId: req.params.id, recipientUserId, expiresInHours,
+                });
+                results.push({ recipientUserId, ok: r.ok, error: r.error, username: r.recipient?.username });
+            }
+            const granted = results.filter((r) => r.ok);
+            // Reported per recipient for the same reason a bulk move is: one bad id must not discard
+            // the rest, and the client can say precisely who it reached.
+            if (granted.length) {
+                const node = await store.getNode(req.params.id);
+                await logActivity(
+                    req.user.username, 'FILE_SHARE',
+                    `Shared "${node?.name}" with ${granted.map((g) => g.username).join(', ')}`, req.ip
+                );
+            }
+            return res.json({ success: true, granted: granted.length, results });
+        }
+
+        res.status(400).json({ error: "kind must be 'link' or 'user'" });
+    } catch (e) { sendServerError(res, e); }
+});
+
+router.get('/api/files/shares/mine', verifyToken, async (req, res) => {
+    try {
+        if (!db) await initDB();
+        const rows = await shares.listMyShares(req.user.username);
+        res.json({
+            shares: rows.map((s) => ({
+                id: s.id,
+                kind: s.kind,
+                token: s.token,
+                itemName: s.node_name,
+                isFolder: !!s.is_folder,
+                recipient: s.recipient_username,
+                createdAt: s.created_at,
+                expiresAt: s.expires_at,
+                opens: s.open_count,
+                lastAccessedAt: s.last_accessed_at,
+            })),
+        });
+    } catch (e) { sendServerError(res, e); }
+});
+
+router.patch('/api/files/share/:id', verifyToken, async (req, res) => {
+    try {
+        if (!db) await initDB();
+        const r = await shares.setShareExpiry({
+            id: req.params.id, username: req.user.username, role: req.user.role,
+            expiresInHours: req.body?.expiresInHours,
+        });
+        if (!r.ok) return res.status(r.status).json({ error: r.error });
+        res.json({ success: true, expiresAt: r.expiresAt });
+    } catch (e) { sendServerError(res, e); }
+});
+
+router.delete('/api/files/share/:id', verifyToken, async (req, res) => {
+    try {
+        if (!db) await initDB();
+        const r = await shares.revokeShare({ id: req.params.id, username: req.user.username, role: req.user.role });
+        if (!r.ok) return res.status(r.status).json({ error: r.error });
+        await logActivity(req.user.username, 'FILE_SHARE_REVOKE', 'Revoked a file share', req.ip);
+        res.json({ success: true });
+    } catch (e) { sendServerError(res, e); }
+});
+
+/**
+ * What other people have shared with this account.
+ *
+ * There is no notification system anywhere in this app and this change does not add one, so this view
+ * plus its count is how a recipient finds out at all. Worth knowing rather than discovering.
+ */
+router.get('/api/files/shared-with-me', verifyToken, async (req, res) => {
+    try {
+        if (!db) await initDB();
+        const rows = await shares.listSharedWithMe(req.user.id);
+        res.json({
+            items: rows.map((s) => ({
+                shareId: s.id,
+                id: s.node_id,
+                name: s.node_name,
+                isFolder: !!s.is_folder,
+                size: s.size,
+                owner: s.owner_username,
+                sharedAt: s.created_at,
+                expiresAt: s.expires_at,
+            })),
+        });
+    } catch (e) { sendServerError(res, e); }
+});
+
+/**
+ * Browsing inside something shared with you. Read-only by design: a recipient can look and download,
+ * never rename, move, delete or re-share — which also disposes of cross-owner moves as a category
+ * rather than as a check.
+ */
+router.get('/api/files/shared/:id', verifyToken, async (req, res) => {
+    try {
+        if (!db) await initDB();
+        const node = await store.getNode(req.params.id);
+        if (!node) return res.status(404).json({ error: 'Not found' });
+        if (!(await shares.grantFor(node, req.user.id))) return res.status(404).json({ error: 'Not found' });
+        if (!node.is_folder) return res.status(400).json({ error: 'That is a file, not a folder' });
+
+        const children = await store.listChildren(node.id);
+        res.json({
+            parent: { id: node.id, name: node.name, owner: node.owner_username },
+            items: children.map((c) => view(c)),
+            readOnly: true,
+        });
+    } catch (e) { sendServerError(res, e); }
+});
+
+// --- Public link (no auth) ----------------------------------------------------------------------
+
+/**
+ * What a public link points at. For a folder, its immediate children; `?node=` walks deeper, and the
+ * resolver verifies descendancy rather than trusting the parameter.
+ */
+router.get('/api/files/share/:token/info', async (req, res) => {
+    try {
+        const r = await shares.resolveFileShare(req.params.token, req.query.node || null);
+        if (!r.ok) return res.status(r.status).json({ error: r.error });
+
+        // Counted once per landing-page load, like media shares — so "opens" means what it says
+        // rather than counting range requests.
+        if (!req.query.node) await shares.touchFileShare(r.share.id);
+
+        const target = r.target;
+        const items = target.is_folder ? await store.listChildren(target.id) : [];
+        res.json({
+            root: { id: r.node.id, name: r.node.name, isFolder: !!r.node.is_folder },
+            current: { id: target.id, name: target.name, isFolder: !!target.is_folder, size: target.size },
+            items: items.map((c) => view(c)),
+        });
+    } catch (e) { sendServerError(res, e); }
+});
+
+/**
+ * Mints a byte grant for something inside a public link.
+ *
+ * Same short-lived FILE_TOKENS mechanism the authenticated path uses, so the files origin has exactly
+ * one way to be asked for bytes and no idea whether the requester was signed in.
+ */
+router.post('/api/files/share/:token/token', async (req, res) => {
+    try {
+        const r = await shares.resolveFileShare(req.params.token, req.body?.node || null);
+        if (!r.ok) return res.status(r.status).json({ error: r.error });
+        if (r.target.is_folder) return res.status(400).json({ error: 'That is a folder' });
+
+        const token = mintFileToken({
+            absPath: storagePathFor(r.target.storage_name),
+            name: r.target.name,
+            size: r.target.size,
             inline: req.body?.inline === true,
         });
         res.json({ success: true, token, path: `/f/${token}` });
