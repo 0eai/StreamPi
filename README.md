@@ -208,6 +208,23 @@ Admins bypass the check entirely, so they never see that screen. An admin can al
 owner from web Settings → Nodes — note that clearing alone doesn't revoke access, since a past owner
 keeps a copy of the key, which is why that dialog offers to regenerate it too.
 
+Two optional fields are worth knowing about:
+
+- **`encoder`** — `"auto"` (the default), `"libx264"`, or a specific hardware encoder such as
+  `"h264_vaapi"`. Detection is a one-shot probe at boot, and on some machines its result depends on
+  things outside the process: VAAPI access is often granted by a logind ACL, so an otherwise identical
+  box answers differently depending on whether anyone is signed in at the console. A pin makes the
+  encoder a decision rather than a discovery. It is still probed at boot, so a pin that cannot work is
+  reported then rather than failing every job.
+- **`workDir`** — where download → transcode → upload jobs stage their files. Defaults to
+  `node/transcoder_work` inside the checkout, which is often on the smallest filesystem a machine has;
+  a job holds the input and the output at the same time, so budget roughly twice the largest source.
+
+On hardware acceleration: VAAPI on an Intel iGPU measured *slower* than `libx264 -preset ultrafast` on
+a 20-core CPU here, but produced output less than half the size. For a node that uploads every result
+back over the network, or has a fixed storage budget, bitrate is usually the thing worth optimising —
+not encode speed.
+
 [scripts/build-worker-dist.sh](scripts/build-worker-dist.sh) packages a distributable copy with the
 template config, never the live one.
 

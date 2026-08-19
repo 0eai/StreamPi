@@ -30,7 +30,15 @@ export const PORT = CFG.port || 4500;
 export const DATABASE_URL = CFG.databaseURL || DEFAULT_DATABASE_URL;
 export const CONFIG_FILE_PATH = CONFIG_PATH;
 
-export const WORK_DIR = path.join(__dirname, 'transcoder_work');
+/**
+ * Scratch space for download → transcode → upload jobs, which hold the input and the output at the
+ * same time — roughly twice the source size, per job.
+ *
+ * Overridable because the default sits inside the checkout, and a checkout is often on the smallest
+ * filesystem a machine has. A symlink would be the obvious alternative and is a trap: mkdirSync does
+ * not follow a final symlink, so a dangling one throws here at import and the node never starts.
+ */
+export const WORK_DIR = CFG.workDir || path.join(__dirname, 'transcoder_work');
 
 // Any failure past a successful transcode — a one-off network blip on the final delivery
 // upload, or the caller simply never retrying — previously left a fully-transcoded

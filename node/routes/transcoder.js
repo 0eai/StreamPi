@@ -97,7 +97,15 @@ router.post('/job', async (req, res) => {
             const command = ffmpeg(sourcePath);
             command.outputOptions(mapOptions);
             command.outputOptions('-movflags +faststart');
-            if (isVideoH264) command.videoCodec('copy'); else command.videoCodec(HW_CONFIG.encoder).outputOptions(HW_CONFIG.options);
+            // The encoder's input options go on only when the encoder does. Applied to the copy
+            // path too, a stale or inaccessible `-vaapi_device` would fail the whole command during
+            // ffmpeg's global option parsing — turning a harmless remux that needs no GPU at all
+            // into a hard error.
+            if (isVideoH264) command.videoCodec('copy');
+            else {
+                if (HW_CONFIG.inputOptions.length) command.inputOptions(HW_CONFIG.inputOptions);
+                command.videoCodec(HW_CONFIG.encoder).outputOptions(HW_CONFIG.options);
+            }
             if (isAllAudioAAC) command.audioCodec('copy'); else command.audioCodec('aac').audioBitrate('160k');
             if (subtitleCount > 0) command.outputOptions('-c:s mov_text');
 
@@ -148,9 +156,18 @@ router.post('/job', async (req, res) => {
                     const response = await axios({ url: downloadUrl, method: 'GET', responseType: 'stream', signal: controller.signal, headers: { 'Authorization': `Bearer ${API_KEY}` } });
                     const totalBytes = parseInt(response.headers['content-length'], 10);
                     let downloadedBytes = 0;
+                    // Only on a whole-percent change. Unthrottled this fired once per chunk — tens of
+                    // thousands of requests for a large source, each carrying this node's API key in
+                    // its body, all aimed at a Raspberry Pi. The upload stage below already throttles
+                    // to 1/s; this was the one that didn't.
+                    let lastReportedPercent = -1;
                     response.data.on('data', (chunk) => {
                         downloadedBytes += chunk.length;
-                        if (totalBytes) reportProgress(fileId, 'downloading_source', Math.round((downloadedBytes / totalBytes) * 100), progressUrl, nodeId);
+                        if (!totalBytes) return;
+                        const percent = Math.round((downloadedBytes / totalBytes) * 100);
+                        if (percent === lastReportedPercent) return;
+                        lastReportedPercent = percent;
+                        reportProgress(fileId, 'downloading_source', percent, progressUrl, nodeId);
                     });
                     response.data.pipe(writer);
                     await new Promise((resolve, reject) => { writer.on('finish', resolve); writer.on('error', reject); response.data.on('error', reject); });
@@ -179,7 +196,15 @@ router.post('/job', async (req, res) => {
             const command = ffmpeg(inputPath);
             command.outputOptions(mapOptions);
             command.outputOptions('-movflags +faststart');
-            if (isVideoH264) command.videoCodec('copy'); else command.videoCodec(HW_CONFIG.encoder).outputOptions(HW_CONFIG.options);
+            // The encoder's input options go on only when the encoder does. Applied to the copy
+            // path too, a stale or inaccessible `-vaapi_device` would fail the whole command during
+            // ffmpeg's global option parsing — turning a harmless remux that needs no GPU at all
+            // into a hard error.
+            if (isVideoH264) command.videoCodec('copy');
+            else {
+                if (HW_CONFIG.inputOptions.length) command.inputOptions(HW_CONFIG.inputOptions);
+                command.videoCodec(HW_CONFIG.encoder).outputOptions(HW_CONFIG.options);
+            }
             if (isAllAudioAAC) command.audioCodec('copy'); else command.audioCodec('aac').audioBitrate('160k');
             if (subtitleCount > 0) command.outputOptions('-c:s mov_text');
 

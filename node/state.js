@@ -6,7 +6,18 @@ import { CFG, IS_NAS, normalizeStorageLocations } from './config.js';
 // reassigned), and plain objects mutated only via in-place property assignment. So every
 // export here is a `const`, and every importer always shares the exact same reference.
 
-export const HW_CONFIG = { encoder: 'libx264', options: ['-preset ultrafast', '-crf 23', '-pix_fmt yuv420p', '-movflags +faststart'], description: 'CPU Software Encoding' };
+/**
+ * `inputOptions` carries flags ffmpeg parses *before* the input — `-vaapi_device` today, `-hwaccel`
+ * later. They cannot live in `options`, which routes/transcoder.js applies as output options: ffmpeg
+ * parses a global option like `-vaapi_device` in its first pass, so a bad or misplaced one fails the
+ * entire command during argument parsing rather than at codec selection.
+ */
+export const HW_CONFIG = {
+    encoder: 'libx264',
+    inputOptions: [],
+    options: ['-preset ultrafast', '-crf 23', '-pix_fmt yuv420p', '-movflags +faststart'],
+    description: 'CPU Software Encoding',
+};
 
 export const JOB_STATE = { isTranscoding: false, currentJobId: null };
 
