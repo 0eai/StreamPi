@@ -56,3 +56,32 @@ export const formatRelativeTime = (epochMs, now = Date.now()) => {
 
     return `${Math.floor(hours / 24)}d ago`;
 };
+
+/**
+ * The forward-looking counterpart, for a deadline rather than a past event: "in 6d", "in 3h",
+ * "expired".
+ *
+ * Not just formatRelativeTime with a flipped sign — that one clamps negatives to zero (to absorb
+ * Pi-vs-browser clock skew) and would render a passed deadline as "0s ago". Here the passed case is
+ * the one that matters, so it gets its own word.
+ *
+ * Takes an ISO string, because that is what the server stores in expires_at and hands back.
+ */
+export const formatTimeUntil = (isoString, now = Date.now()) => {
+    if (!isoString) return 'never';
+
+    const ms = new Date(isoString).getTime();
+    if (Number.isNaN(ms)) return 'unknown';
+
+    const seconds = Math.floor((ms - now) / 1000);
+    if (seconds <= 0) return 'expired';
+    if (seconds < 60) return `in ${seconds}s`;
+
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `in ${minutes}m`;
+
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `in ${hours}h`;
+
+    return `in ${Math.floor(hours / 24)}d`;
+};

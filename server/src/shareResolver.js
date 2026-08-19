@@ -1,4 +1,5 @@
 import { db, initDB } from './db.js';
+import { isShareLive } from './shareExpiry.js';
 
 /**
  * Resolve a public share token to whatever it grants access to.
@@ -21,9 +22,9 @@ export const resolveShare = async (token, requestedPath = null) => {
     if (!db) await initDB();
 
     const share = await db.get("SELECT * FROM shares WHERE token = ?", token);
-    if (!share) return { ok: false, status: 404, error: 'Link not found' };
-    if (share.revoked) return { ok: false, status: 404, error: 'Link not found' };
-    if (share.expires_at && new Date(share.expires_at) < new Date()) return { ok: false, status: 404, error: 'Link not found' };
+    // Missing, revoked and expired collapse into the one answer — see isShareLive, which the
+    // file-share resolver shares so both kinds of link die the same way.
+    if (!isShareLive(share)) return { ok: false, status: 404, error: 'Link not found' };
 
     if (share.share_type === 'file') {
         const media = await db.get("SELECT * FROM media WHERE path = ?", share.media_path);

@@ -4,6 +4,7 @@ import path from 'path';
 import { db, initDB, logActivity } from '../db.js';
 import { verifyToken } from '../middleware.js';
 import { resolveShare, touchShare } from '../shareResolver.js';
+import { expiryFromHours, isShareLive, LIVE_SHARE_SQL } from '../shareExpiry.js';
 import { streamMediaFile, downloadMediaFile } from '../streamCore.js';
 import { sendServerError } from '../logger.js';
 
@@ -12,7 +13,14 @@ const router = express.Router();
 // --- Owner-side management (verifyToken) ---
 
 router.post('/api/share', verifyToken, async (req, res) => {
-    const { shareType, path: mediaPath, seriesName } = req.body;
+    const { shareType, path: mediaPath, seriesName, expiresInHours } = req.body;
+
+    // Optional, and omitting it means "never" — which is what every share created before this
+    // existed already is, so the one-click share path in useLibraryActions keeps working unchanged.
+    const expiry = expiryFromHours(expiresInHours);
+    if (!expiry.ok) return res.status(400).json({ error: expiry.error });
+    const expiresAt = expiry.expiresAt;
+    const expiryNote = expiresAt ? ` (expires ${expiresAt})` : '';
 
     try {
         if (!db) await initDB();
@@ -30,10 +38,10 @@ router.post('/api/share', verifyToken, async (req, res) => {
 
             const token = crypto.randomUUID();
             await db.run(
-                "INSERT INTO shares (token, share_type, media_path, owner_username, created_at) VALUES (?, 'file', ?, ?, ?)",
-                [token, mediaPath, req.user.username, new Date().toISOString()]
+                "INSERT INTO shares (token, share_type, media_path, owner_username, created_at, expires_at) VALUES (?, 'file', ?, ?, ?, ?)",
+                [token, mediaPath, req.user.username, new Date().toISOString(), expiresAt]
             );
-            await logActivity(req.user.username, "SHARE", `Created share link for ${path.basename(mediaPath)}`, req.ip);
+            await logActivity(req.user.username, "SHARE", `Created share link for ${path.basename(mediaPath)}${expiryNote}`, req.ip);
             return res.json({ success: true, token });
         }
 
@@ -45,10 +53,10 @@ router.post('/api/share', verifyToken, async (req, res) => {
 
             const token = crypto.randomUUID();
             await db.run(
-                "INSERT INTO shares (token, share_type, series_name, owner_username, created_at) VALUES (?, 'series', ?, ?, ?)",
-                [token, seriesName, req.user.username, new Date().toISOString()]
+                "INSERT INTO shares (token, share_type, series_name, owner_username, created_at, expires_at) VALUES (?, 'series', ?, ?, ?, ?)",
+                [token, seriesName, req.user.username, new Date().toISOString(), expiresAt]
             );
-            await logActivity(req.user.username, "SHARE", `Created share link for series "${seriesName}"`, req.ip);
+            await logActivity(req.user.username, "SHARE", `Created share link for series "${seriesName}"${expiryNote}`, req.ip);
             return res.json({ success: true, token });
         }
 
@@ -59,7 +67,13 @@ router.post('/api/share', verifyToken, async (req, res) => {
 router.get('/api/share/mine', verifyToken, async (req, res) => {
     try {
         if (!db) await initDB();
-        const rows = await db.all("SELECT * FROM shares WHERE owner_username = ? AND revoked = 0 ORDER BY created_at DESC", req.user.username);
+        // Filters expired rows as well as revoked ones. Without this a link that has already
+        // stopped working keeps listing here as though it were live — the one read of `shares`
+        // that needed changing when expires_at started being populated.
+        const rows = await db.all(
+            `SELECT * FROM shares WHERE owner_username = ? AND ${LIVE_SHARE_SQL} ORDER BY created_at DESC`,
+            [req.user.username, new Date().toISOString()]
+        );
 
         const shares = await Promise.all(rows.map(async (s) => {
             let title = s.series_name;
@@ -72,6 +86,7 @@ router.get('/api/share/mine', verifyToken, async (req, res) => {
                 shareType: s.share_type,
                 title,
                 createdAt: s.created_at,
+                expiresAt: s.expires_at,
                 viewCount: s.view_count,
                 lastAccessedAt: s.last_accessed_at,
             };
@@ -91,6 +106,41 @@ router.delete('/api/share/:token', verifyToken, async (req, res) => {
         }
         await db.run("UPDATE shares SET revoked = 1 WHERE token = ?", req.params.token);
         res.json({ success: true });
+    } catch (e) { sendServerError(res, e); }
+});
+
+/**
+ * Set or clear the expiry on a share that already exists.
+ *
+ * This is what keeps creating a share a single click: handleShare posts and immediately shows the
+ * link, and anyone who wants the link to be temporary sets that here afterwards, rather than every
+ * share paying for a duration picker it usually doesn't need.
+ *
+ * Deliberately refuses to edit a share that has already expired. Reviving one would mean an
+ * "expired" link isn't reliably dead, and /api/share/mine no longer lists them anyway — so the
+ * honest move is to make a new link.
+ */
+router.patch('/api/share/:token', verifyToken, async (req, res) => {
+    const expiry = expiryFromHours(req.body?.expiresInHours);
+    if (!expiry.ok) return res.status(400).json({ error: expiry.error });
+
+    try {
+        if (!db) await initDB();
+        const share = await db.get("SELECT owner_username, revoked, expires_at FROM shares WHERE token = ?", req.params.token);
+        if (!share) return res.status(404).json({ error: "Share not found" });
+        if (share.owner_username !== req.user.username && req.user.role !== 'super_admin') {
+            return res.status(403).json({ error: "Access Denied" });
+        }
+        if (!isShareLive(share)) return res.status(404).json({ error: "Share not found" });
+
+        await db.run("UPDATE shares SET expires_at = ? WHERE token = ?", [expiry.expiresAt, req.params.token]);
+        await logActivity(
+            req.user.username,
+            "SHARE_EXPIRY",
+            expiry.expiresAt ? `Set share link to expire ${expiry.expiresAt}` : "Removed the expiry from a share link",
+            req.ip
+        );
+        res.json({ success: true, expiresAt: expiry.expiresAt });
     } catch (e) { sendServerError(res, e); }
 });
 

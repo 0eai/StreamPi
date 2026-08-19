@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { formatRelativeTime } from './format';
+import { formatRelativeTime, formatTimeUntil } from './format';
 
 /**
  * `now` is injected throughout so these assert the boundaries rather than racing the clock.
@@ -39,5 +39,32 @@ describe('formatRelativeTime', () => {
         // be identical, so adopting it there is not a visible change.
         const t = NOW - 42_000;
         expect(formatRelativeTime(t, NOW)).toBe(`${Math.floor((NOW - t) / 1000)}s ago`);
+    });
+});
+
+describe('formatTimeUntil', () => {
+    const NOW = Date.parse('2026-08-19T12:00:00.000Z');
+
+    it('says never for no deadline, which is what an unexpiring share has', () => {
+        expect(formatTimeUntil(null, NOW)).toBe('never');
+        expect(formatTimeUntil(undefined, NOW)).toBe('never');
+    });
+
+    it('counts forward in the largest useful unit', () => {
+        expect(formatTimeUntil('2026-08-19T12:00:30.000Z', NOW)).toBe('in 30s');
+        expect(formatTimeUntil('2026-08-19T12:45:00.000Z', NOW)).toBe('in 45m');
+        expect(formatTimeUntil('2026-08-19T18:00:00.000Z', NOW)).toBe('in 6h');
+        expect(formatTimeUntil('2026-08-26T12:00:00.000Z', NOW)).toBe('in 7d');
+    });
+
+    it('says expired rather than "0s ago" for a passed deadline', () => {
+        // The reason this isn't formatRelativeTime with a flipped sign: that one clamps negatives
+        // to zero to absorb clock skew, which would render a dead link as though it just expired.
+        expect(formatTimeUntil('2026-08-18T12:00:00.000Z', NOW)).toBe('expired');
+        expect(formatTimeUntil('2026-08-19T12:00:00.000Z', NOW)).toBe('expired');
+    });
+
+    it('does not render NaN for an unparseable value', () => {
+        expect(formatTimeUntil('not a date', NOW)).toBe('unknown');
     });
 });

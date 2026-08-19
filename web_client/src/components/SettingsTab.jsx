@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { User, Lock, KeyRound, Server, Plus, ExternalLink, Share2, Film, Tv, Trash2, Copy, Check } from 'lucide-react';
+import { User, Lock, KeyRound, Server, Plus, ExternalLink, Share2, Film, Tv, Trash2, Copy, Check, Clock } from 'lucide-react';
 import ActivityLog from './ActivityLog';
 import AddNodeModal from './AddNodeModal';
 import TransferNodeModal from './TransferNodeModal';
+import ShareExpiryModal from './ShareExpiryModal';
 import MyDevices from './MyDevices';
 import { useDialogs } from './ui/dialogs';
 import { useToast } from './ui/toast';
@@ -11,7 +12,7 @@ import NodeDetailModal from './NodeDetailModal';
 import UserManagement from './UserManagement';
 import ChangePasswordModal from './ChangePasswordModal';
 import LinkKunjiModal from './LinkKunjiModal';
-import { formatBytes } from '../utils/format';
+import { formatBytes, formatTimeUntil } from '../utils/format';
 import { usePolling } from '../utils/usePolling';
 import { apiFetch, parseJsonSafe } from '../utils/api';
 import { copyToClipboard } from '../utils/clipboard';
@@ -37,6 +38,7 @@ const SettingsTab = ({ token, serverUrl, username, role, onLogout }) => {
 
     const [shares, setShares] = useState([]);
     const [copiedShareToken, setCopiedShareToken] = useState(null);
+    const [expiryShare, setExpiryShare] = useState(null);
 
     const loadShares = async () => {
         try {
@@ -67,6 +69,23 @@ const SettingsTab = ({ token, serverUrl, username, role, onLogout }) => {
             }
             loadShares();
         } catch (e) { toast.error("Revoke failed: " + e.message); }
+    };
+
+    const handleSetShareExpiry = async (expiresInHours) => {
+        const share = expiryShare;
+        try {
+            const res = await apiFetch(serverUrl, `/api/share/${share.token}`, token, {
+                method: 'PATCH',
+                json: { expiresInHours },
+            });
+            if (!res.ok) {
+                const data = await parseJsonSafe(res);
+                toast.error(`Couldn't change the expiry: ${data.error || res.statusText}`);
+                return;
+            }
+            setExpiryShare(null);
+            loadShares();
+        } catch (e) { toast.error("Couldn't change the expiry: " + e.message); }
     };
 
     const refreshKunjiLinkStatus = async (t) => {
@@ -228,7 +247,10 @@ const SettingsTab = ({ token, serverUrl, username, role, onLogout }) => {
                                     <th className="px-6 py-3">Title</th>
                                     <th className="px-6 py-3">Type</th>
                                     <th className="px-6 py-3">Created</th>
-                                    <th className="px-6 py-3">Views</th>
+                                    <th className="px-6 py-3">Expires</th>
+                                    {/* "Opens", not "Views": the counter behind it only moves when the
+                                        share's landing page loads, never per stream or download. */}
+                                    <th className="px-6 py-3">Opens</th>
                                     <th className="px-6 py-3 text-right">Actions</th>
                                 </tr>
                             </thead>
@@ -243,10 +265,18 @@ const SettingsTab = ({ token, serverUrl, username, role, onLogout }) => {
                                             </span>
                                         </td>
                                         <td className="px-6 py-3 text-gray-400 text-xs">{new Date(s.createdAt).toLocaleDateString()}</td>
+                                        <td className="px-6 py-3 text-xs">
+                                            {s.expiresAt
+                                                ? <span className="text-yellow-500" title={new Date(s.expiresAt).toLocaleString()}>{formatTimeUntil(s.expiresAt)}</span>
+                                                : <span className="text-gray-600">never</span>}
+                                        </td>
                                         <td className="px-6 py-3 text-gray-400 text-xs">{s.viewCount}</td>
                                         <td className="px-6 py-3 text-right">
                                             <button onClick={() => handleCopyShareLink(s.token)} className="inline-flex items-center gap-1 text-xs text-blue-500 hover:text-blue-400 font-medium mr-3">
                                                 {copiedShareToken === s.token ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />} Copy
+                                            </button>
+                                            <button onClick={() => setExpiryShare(s)} className="inline-flex items-center gap-1 text-xs text-gray-400 hover:text-white font-medium mr-3">
+                                                <Clock className="w-3.5 h-3.5" /> Expiry
                                             </button>
                                             <button onClick={() => handleRevokeShare(s.token)} className="inline-flex items-center gap-1 text-xs text-red-500 hover:text-red-400 font-medium">
                                                 <Trash2 className="w-3.5 h-3.5" /> Revoke
@@ -262,6 +292,12 @@ const SettingsTab = ({ token, serverUrl, username, role, onLogout }) => {
 
             {/* MY DEVICES — every logged-in user, like Account and My Shares above. The only place
                 a non-admin can see or revoke their own sign-ins. */}
+            <ShareExpiryModal
+                share={expiryShare}
+                onClose={() => setExpiryShare(null)}
+                onSave={handleSetShareExpiry}
+            />
+
             <MyDevices token={token} serverUrl={serverUrl} onLogout={onLogout} />
 
             {isAdmin(role) && (
