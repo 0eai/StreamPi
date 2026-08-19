@@ -6,8 +6,9 @@
 // bump is what reclaims the space the superseded ones were using.
 //
 // v6 also evicts the /icons/ entries left behind by v5, which no longer belong in any cache
-// (see below).
-const VERSION = 'v6';
+// (see below). v7 adds the /api/ bail in the navigate branch — a top-level navigation to a download
+// URL was previously cached as the app shell.
+const VERSION = 'v7';
 const SHELL_CACHE = `streampi-shell-${VERSION}`;
 const ASSET_CACHE = `streampi-assets-${VERSION}`;
 
@@ -57,6 +58,11 @@ self.addEventListener('fetch', (event) => {
 
     const url = new URL(request.url);
     if (url.origin !== self.location.origin) return;
+
+    // A navigation to an /api/ path is never the app shell — it is a file download or another raw
+    // response the browser decided to open at the top level. Caching one of those under '/' would
+    // serve it as index.html on the next offline open, so bail before the shell logic below.
+    if (request.mode === 'navigate' && url.pathname.startsWith('/api/')) return;
 
     // App shell: always try the network first so a new deploy is picked up immediately;
     // the cached copy exists purely so the app still opens with no connection.

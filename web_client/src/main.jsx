@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client';
 import AppWrapper from './StreamApp'; // This is your existing App export
 import DownloadsPage from './components/DownloadsPage';
 import SharePlayerPage from './components/SharePlayerPage';
+import FileSharePage from './components/files/FileSharePage';
 import ErrorBoundary from './components/ErrorBoundary';
 import { ToastProvider } from './components/ui/toast';
 import { DialogProvider } from './components/ui/dialogs';
@@ -27,6 +28,12 @@ const pathParts = window.location.pathname.split('/').filter(Boolean);
 const isSharePage = pathParts[0] === 'share' && !!pathParts[1];
 const shareToken = isSharePage ? decodeURIComponent(pathParts[1]) : null;
 
+// /f/<token> is the third, for a shared file or folder. Kept short because it is meant to be pasted
+// into a message; kept separate from /share/<token> because the two resolve against different tables
+// and a viewer of one must never be handed the other's resolver.
+const isFileSharePage = pathParts[0] === 'f' && !!pathParts[1];
+const fileShareToken = isFileSharePage ? decodeURIComponent(pathParts[1]) : null;
+
 // Top-level backstop — a second, more targeted boundary sits inside StreamApp itself around
 // just the active tab's content, so this one should only ever be reached by a crash outside
 // that (nav chrome, modals). Reloading is the only real recovery at this level since state
@@ -39,7 +46,10 @@ root.render(
                 entry point, including the two unauthenticated pages. */}
             <ToastProvider>
                 <DialogProvider>
-                    {isDownloadsPage ? <DownloadsPage /> : isSharePage ? <SharePlayerPage token={shareToken} /> : <AppWrapper />}
+                    {isDownloadsPage ? <DownloadsPage />
+                        : isSharePage ? <SharePlayerPage token={shareToken} />
+                        : isFileSharePage ? <FileSharePage token={fileShareToken} />
+                        : <AppWrapper />}
                 </DialogProvider>
             </ToastProvider>
         </ErrorBoundary>

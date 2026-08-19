@@ -15,6 +15,7 @@ import Poster from './components/Poster';
 import EpisodeCard from './components/EpisodeCard';
 import UploadQueue from './components/UploadQueue';
 import UploadWizard from './components/UploadWizard';
+import FilesTab from './components/files/FilesTab';
 import CustomVideoPlayer from './components/CustomVideoPlayer';
 import ShareModal from './components/ShareModal';
 import CastModal from './components/CastModal';
@@ -227,6 +228,7 @@ export default function StreamApp() {
                         {activeTab === 'dashboard' && (
                             <DashboardTab token={token} serverUrl={SERVER_URL} role={role} onLogout={handleLogout} />
                         )}
+                        {activeTab === 'files' && <FilesTab token={token} serverUrl={SERVER_URL} uploads={uploads} />}
                         {activeTab === 'settings' && (
                             <SettingsTab token={token} serverUrl={SERVER_URL} username={username} role={role} onLogout={handleLogout} />
                         )}

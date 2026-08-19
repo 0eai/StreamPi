@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Home, LayoutDashboard, Compass, LogOut, User, UploadCloud, Film, Tv, Settings as SettingsIcon, Download as DownloadIcon } from 'lucide-react';
+import { Home, LayoutDashboard, Compass, LogOut, User, UploadCloud, Film, Tv, Settings as SettingsIcon, Download as DownloadIcon, FolderOpen } from 'lucide-react';
 import ServerStats from './ServerStats';
 import Button from './ui/Button';
 
@@ -9,6 +9,7 @@ const TABS = [
     { id: 'home', label: 'Home', Icon: Home },
     { id: 'movies', label: 'Movies', Icon: Film },
     { id: 'series', label: 'Series', Icon: Tv },
+    { id: 'files', label: 'Files', Icon: FolderOpen },
 ];
 
 // Peeled off StreamApp.jsx — owns everything about the nav bar itself: tabs, the upload

@@ -398,6 +398,9 @@ router.get('/api/files/shares/mine', verifyToken, async (req, res) => {
                 id: s.id,
                 kind: s.kind,
                 token: s.token,
+                // The node id, not just its name: two folders in different places can share a name,
+                // and the client uses this to decide which one is marked as shared.
+                nodeId: s.node_id,
                 itemName: s.node_name,
                 isFolder: !!s.is_folder,
                 recipient: s.recipient_username,
