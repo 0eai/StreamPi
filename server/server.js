@@ -19,6 +19,7 @@ import { scanLibrary } from './src/mediaPipeline.js';
 import { startSystemStatsSampling } from './src/systemStats.js';
 import { startAutoArchiver } from './src/autoArchiver.js';
 import { startPosterHealer } from './src/posterHealer.js';
+import { startFileReaper } from './src/fileReaper.js';
 
 import internalRoutes from './src/routes/internal.js';
 import adminRoutes from './src/routes/admin.js';
@@ -189,6 +190,9 @@ const startBackgroundJobs = async () => {
     startPosterHealer();
 
     setInterval(cleanOldTempFiles, 60 * 60 * 1000);
+    // Auto-delete and the trash: expires what is due, purges what has sat in the trash past the
+    // grace period, and collects bytes with no row. Same hourly cadence as the temp sweep above.
+    startFileReaper();
     startStreamStalenessSweep();
 
     setInterval(checkTranscodeQueue, 30000);

@@ -8,6 +8,7 @@ import { storagePathFor } from '../paths.js';
 import { uploadUserFile } from '../uploadMiddleware.js';
 import { mintFileToken, canRenderInline } from '../fileServer.js';
 import { effectiveExpiry } from '../fileTree.js';
+import { expiryFromHours } from '../shareExpiry.js';
 import * as store from '../fileStore.js';
 import * as shares from '../fileShares.js';
 
@@ -97,12 +98,38 @@ router.post('/api/files/folders/ensure', verifyToken, async (req, res) => {
     } catch (e) { sendServerError(res, e); }
 });
 
+/**
+ * Renames, or sets auto-delete, or both.
+ *
+ * `expiresInHours` uses the same helper as share expiry, so "30 days" means the same thing in both
+ * places and both store a canonical ISO timestamp. On a folder the deadline becomes a ceiling for
+ * everything inside it — see effectiveExpiry.
+ */
 router.patch('/api/files/:id', verifyToken, async (req, res) => {
     try {
         if (!db) await initDB();
-        const result = await store.renameNode({ owner: req.user.username, id: req.params.id, name: req.body?.name });
-        if (!result.ok) return res.status(result.status).json({ error: result.error });
-        res.json({ success: true, item: view(result.node) });
+        const owner = req.user.username;
+        let item;
+
+        if (req.body?.name !== undefined) {
+            const renamed = await store.renameNode({ owner, id: req.params.id, name: req.body.name });
+            if (!renamed.ok) return res.status(renamed.status).json({ error: renamed.error });
+            item = renamed.node;
+        }
+
+        if (req.body?.expiresInHours !== undefined) {
+            const expiry = expiryFromHours(req.body.expiresInHours);
+            if (!expiry.ok) return res.status(400).json({ error: expiry.error });
+            const set = await store.setExpiry({ owner, id: req.params.id, expiresAt: expiry.expiresAt });
+            if (!set.ok) return res.status(set.status).json({ error: set.error });
+            item = set.node;
+        }
+
+        if (!item) return res.status(400).json({ error: 'Nothing to change' });
+
+        // Re-read the chain so the response carries the effective expiry, not just the stored one.
+        const chain = await store.ancestorsOf(item);
+        res.json({ success: true, item: view(item, chain) });
     } catch (e) { sendServerError(res, e); }
 });
 
@@ -158,6 +185,67 @@ router.get('/api/files/:id/summary', verifyToken, async (req, res) => {
         if (!node) return res.status(404).json({ error: 'Item not found' });
         if (node.owner_username !== req.user.username) return res.status(403).json({ error: 'Access Denied' });
         res.json(await store.subtreeSummary(node));
+    } catch (e) { sendServerError(res, e); }
+});
+
+// --- Trash --------------------------------------------------------------------------------------
+
+/**
+ * What is recoverable, and for how long.
+ *
+ * Only the top-most trashed items: deleting a folder marks its whole subtree, so listing every marked
+ * row would show the folder and then each of its children separately — all of which come back
+ * together anyway.
+ */
+router.get('/api/files/trash', verifyToken, async (req, res) => {
+    try {
+        if (!db) await initDB();
+        const rows = await store.listTrash(req.user.username);
+        const graceDays = Number(await getSetting('files_trash_grace_days', '7'));
+        res.json({
+            graceDays,
+            items: rows.map((n) => ({
+                id: n.id,
+                name: n.name,
+                isFolder: !!n.is_folder,
+                size: n.size,
+                deletedAt: n.deleted_at,
+                purgesAt: new Date(new Date(n.deleted_at).getTime() + graceDays * 86400000).toISOString(),
+            })),
+        });
+    } catch (e) { sendServerError(res, e); }
+});
+
+router.post('/api/files/:id/restore', verifyToken, async (req, res) => {
+    try {
+        if (!db) await initDB();
+        const result = await store.restoreNode({ owner: req.user.username, id: req.params.id });
+        if (!result.ok) return res.status(result.status).json({ error: result.error });
+        res.json({ success: true, restored: result.restored });
+    } catch (e) { sendServerError(res, e); }
+});
+
+/**
+ * Skips the grace period for one item.
+ *
+ * Deliberately reuses the reaper's ordering rather than inventing its own: rows first, then bytes, so
+ * a failure halfway leaves something the orphan sweep collects instead of a row pointing at nothing.
+ */
+router.delete('/api/files/:id/purge', verifyToken, async (req, res) => {
+    try {
+        if (!db) await initDB();
+        const node = await store.getNodeIncludingTrashed(req.params.id);
+        if (!node || !node.deleted_at) return res.status(404).json({ error: 'Not in the trash' });
+        if (node.owner_username !== req.user.username) return res.status(403).json({ error: 'Access Denied' });
+
+        const subtree = await store.trashedSubtree(node);
+        await store.purgeRows(subtree.map((n) => n.id));
+        for (const n of subtree.filter((x) => x.storage_name)) {
+            await fs.unlink(storagePathFor(n.storage_name)).catch(() => {});
+        }
+
+        await logActivity(req.user.username, 'FILE_PURGE', `Permanently deleted "${node.name}"`, req.ip);
+        res.json({ success: true, purged: subtree.length });
     } catch (e) { sendServerError(res, e); }
 });
 

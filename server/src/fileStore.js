@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import { db, initDB } from './db.js';
-import { buildPathIds, rewritePathIds, canMove, validateName, ancestorIds, depthOf, MAX_DEPTH } from './fileTree.js';
+import { buildPathIds, canMove, validateName, ancestorIds, depthOf, MAX_DEPTH } from './fileTree.js';
 
 /**
  * Every database operation on the file tree, in one place.
@@ -303,4 +303,134 @@ export const subtreeSummary = async (node) => {
         `${node.path_ids}%`
     );
     return { items: row?.items || 0, files: row?.files || 0, bytes: row?.bytes || 0 };
+};
+
+// --- Trash and expiry ---------------------------------------------------------------------------
+
+/**
+ * What this user has in the trash, top-most items only.
+ *
+ * Deleting a folder marks its whole subtree, so listing every marked row would show a folder and then
+ * each of its children as separate entries — all of which come back together anyway. Only rows whose
+ * parent is not itself trashed are shown.
+ */
+export const listTrash = async (owner) => {
+    await ready();
+    return db.all(
+        `SELECT c.* FROM file_nodes c
+           LEFT JOIN file_nodes p ON p.id = c.parent_id
+          WHERE c.owner_username = ? AND c.deleted_at IS NOT NULL
+            AND (p.id IS NULL OR p.deleted_at IS NULL)
+          ORDER BY c.deleted_at DESC`,
+        owner
+    );
+};
+
+/**
+ * Brings a trashed item back where it was.
+ *
+ * Its trashed ancestors come back too — otherwise restoring a file from inside a deleted folder would
+ * leave it attached to a parent that is still in the trash, which is neither visible nor really
+ * restored. The alternative, silently relocating it to the top level, loses where it belonged.
+ */
+export const restoreNode = async ({ owner, id }) => {
+    await ready();
+    const node = await getNodeIncludingTrashed(id);
+    if (!node || !node.deleted_at) return { ok: false, status: 404, error: 'Not in the trash' };
+    if (node.owner_username !== owner) return { ok: false, status: 403, error: 'Access Denied' };
+
+    // Something may have taken the name while this was gone. The partial unique index would reject
+    // the update anyway; checking first turns a constraint error into an explanation.
+    const clash = await liveSibling(node.parent_id, node.name);
+    if (clash) {
+        return { ok: false, status: 409, error: `Something called "${node.name}" is there now — rename it first` };
+    }
+
+    const ancestors = ancestorIds(node.path_ids).filter((a) => a !== node.id);
+    const ts = nowIso();
+    if (ancestors.length) {
+        await db.run(
+            `UPDATE file_nodes SET deleted_at = NULL, updated_at = ?
+              WHERE id IN (${ancestors.map(() => '?').join(',')}) AND deleted_at IS NOT NULL`,
+            [ts, ...ancestors]
+        );
+    }
+    const result = await db.run(
+        "UPDATE file_nodes SET deleted_at = NULL, updated_at = ? WHERE path_ids LIKE ? AND deleted_at IS NOT NULL",
+        [ts, `${node.path_ids}%`]
+    );
+    return { ok: true, restored: result?.changes ?? 0 };
+};
+
+/**
+ * A trashed node and everything trashed beneath it.
+ *
+ * subtreeOf can't serve this — it filters to live rows, which is right everywhere else and exactly
+ * wrong here. Ordered deepest-first so a caller unlinking as it goes never depends on a parent row
+ * still being present.
+ */
+export const trashedSubtree = async (node) => {
+    await ready();
+    return db.all(
+        "SELECT * FROM file_nodes WHERE path_ids LIKE ? AND deleted_at IS NOT NULL ORDER BY path_ids DESC",
+        `${node.path_ids}%`
+    );
+};
+
+/**
+ * Everything due to be removed for good: trashed longer than the grace period.
+ *
+ * Returns the individual rows rather than subtree roots, because the caller has to unlink each file's
+ * bytes and every row goes regardless of which ancestor was deleted.
+ */
+export const purgeableNodes = async (cutoffIso) => {
+    await ready();
+    return db.all(
+        "SELECT * FROM file_nodes WHERE deleted_at IS NOT NULL AND deleted_at <= ? ORDER BY path_ids DESC",
+        cutoffIso
+    );
+};
+
+/**
+ * Removes rows for good. Shares first, then the nodes — and the caller unlinks bytes only after this
+ * returns, matching the ordering autoArchiver uses deliberately: a crash between the two leaves a
+ * nameless blob the orphan sweep collects, where the other order leaves a row pointing at nothing.
+ */
+export const purgeRows = async (ids) => {
+    await ready();
+    if (!ids.length) return 0;
+    const marks = ids.map(() => '?').join(',');
+    await db.run(`DELETE FROM file_shares WHERE node_id IN (${marks})`, ids);
+    const result = await db.run(`DELETE FROM file_nodes WHERE id IN (${marks})`, ids);
+    return result?.changes ?? 0;
+};
+
+/** Nodes carrying an expiry that has passed. Their subtrees go with them — see the reaper. */
+export const expiredNodes = async (nowIsoValue) => {
+    await ready();
+    return db.all(
+        "SELECT * FROM file_nodes WHERE expires_at IS NOT NULL AND expires_at <= ? AND deleted_at IS NULL",
+        nowIsoValue
+    );
+};
+
+/** Sets or clears an item's auto-delete. On a folder this becomes a ceiling for everything inside. */
+export const setExpiry = async ({ owner, id, expiresAt }) => {
+    await ready();
+    const node = await getNode(id);
+    if (!node) return { ok: false, status: 404, error: 'Item not found' };
+    if (node.owner_username !== owner) return { ok: false, status: 403, error: 'Access Denied' };
+    // The root cannot be deleted, so an expiry on it would be found expired on every sweep forever
+    // without anything ever happening.
+    if (!node.parent_id) return { ok: false, status: 400, error: "Your top-level folder can't auto-delete" };
+
+    await db.run("UPDATE file_nodes SET expires_at = ?, updated_at = ? WHERE id = ?", [expiresAt, nowIso(), id]);
+    return { ok: true, node: await getNode(id) };
+};
+
+/** Storage names still referenced by a row, for the orphan sweep to compare against the disk. */
+export const knownStorageNames = async () => {
+    await ready();
+    const rows = await db.all("SELECT storage_name FROM file_nodes WHERE storage_name IS NOT NULL");
+    return new Set(rows.map((r) => r.storage_name));
 };
