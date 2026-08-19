@@ -61,6 +61,11 @@ app.use(express.json());
 // via <meta>.
 app.use((req, res, next) => {
     res.setHeader('Content-Security-Policy', "script-src 'self' https://kunji.cc; object-src 'none'; base-uri 'self'; frame-ancestors 'self';");
+    // Nothing that serves a file declares a Content-Type for it, which leaves the browser free to
+    // guess one from the bytes — and a guess of text/html on a response the user believed was a
+    // download is how stored bytes become script on this origin, which the CSP's `script-src 'self'`
+    // would then allow. Set once here so no future route can forget it.
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     next();
 });
 

@@ -186,7 +186,16 @@ router.get('/api/share/:token/download', async (req, res) => {
     if (!result.ok) return res.status(result.status).send(result.error);
     if (!result.media) return res.status(400).send("Path required for a series share");
 
-    await downloadMediaFile(req, res, result.media.path, result.media.filename);
+    try {
+        await downloadMediaFile(req, res, result.media.path, result.media.filename);
+    } catch (e) {
+        // Express 4 does not catch a rejected async handler, and an uncaught one here means no
+        // response is ever sent — the client waits out the 8-hour socket timeout instead of
+        // seeing an error. Cheap insurance on the one route that streams bytes to the public.
+        console.error('Share download failed:', e.message);
+        if (!res.headersSent) res.status(500).send("Download failed");
+        else try { res.destroy(); } catch (_) { /* already tearing down */ }
+    }
 });
 
 // Series shares only — file shares have no "next", by design (a single-item grant shouldn't

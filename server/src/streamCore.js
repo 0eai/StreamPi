@@ -6,6 +6,7 @@ import axios from 'axios';
 import ffmpeg from 'fluent-ffmpeg';
 import { logActivity } from './db.js';
 import { ACTIVE_STREAMS } from './state.js';
+import { contentDispositionFor } from './contentDisposition.js';
 import { resolveNasFile, parseNasPath } from './nasSource.js';
 import { checkTranscodeQueue } from './transcodeQueue.js';
 
@@ -349,7 +350,10 @@ export const streamSubtitle = async (req, res, filePath, index) => {
  * direct-play/transcode decision here — a download is the raw bytes as stored, full stop.
  */
 export const downloadMediaFile = async (req, res, filePath, filename) => {
-    const safeName = (filename || path.basename(filePath)).replace(/"/g, '');
+    // RFC 6266 rather than a quote-strip: setHeader throws ERR_INVALID_CHAR on a non-latin1 name,
+    // and since both callers await this without a try/catch, that throw used to mean the response
+    // was never sent — an emoji in a filename hung the client until the 8-hour socket timeout.
+    const disposition = contentDispositionFor(filename || path.basename(filePath));
 
     if (filePath.startsWith('nas://')) {
         const nas = resolveNasFile(filePath);
@@ -362,7 +366,8 @@ export const downloadMediaFile = async (req, res, filePath, filename) => {
                 responseType: 'stream',
                 headers: { 'Authorization': `Bearer ${nas.apiKey}` }
             });
-            res.setHeader('Content-Disposition', `attachment; filename="${safeName}"`);
+            res.setHeader('Content-Disposition', disposition);
+            res.setHeader('X-Content-Type-Options', 'nosniff');
             if (response.headers['content-length']) res.setHeader('Content-Length', response.headers['content-length']);
             response.data.on('error', (err) => { console.error('NAS download stream error:', err.message); try { res.destroy(); } catch(e){} });
             response.data.pipe(res);
@@ -377,7 +382,9 @@ export const downloadMediaFile = async (req, res, filePath, filename) => {
     if (!existsSync(filePath)) return res.status(404).send("File not found");
 
     const stat = await fs.stat(filePath);
-    res.setHeader('Content-Disposition', `attachment; filename="${safeName}"`);
+    res.setHeader('Content-Disposition', disposition);
+    // No Content-Type is set here, so without this a browser is free to sniff one from the bytes.
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Content-Length', stat.size);
     createReadStream(filePath)
         .on('error', (err) => { console.error('Download read error:', err.message); try { res.destroy(); } catch(e){} })

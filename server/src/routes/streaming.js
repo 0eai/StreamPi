@@ -123,7 +123,14 @@ router.get('/api/download', verifyToken, async (req, res) => {
 
     if (!db) await initDB();
     const mediaItem = await db.get("SELECT filename FROM media WHERE path = ?", filePath);
-    await downloadMediaFile(req, res, filePath, mediaItem?.filename);
+    try {
+        await downloadMediaFile(req, res, filePath, mediaItem?.filename);
+    } catch (e) {
+        // See the matching comment in routes/share.js: an unhandled rejection here sends nothing.
+        console.error('Download failed:', e.message);
+        if (!res.headersSent) res.status(500).send("Download failed");
+        else try { res.destroy(); } catch (_) { /* already tearing down */ }
+    }
 });
 
 // Explicit "I'm done" signal, sent via navigator.sendBeacon when CustomVideoPlayer.jsx
