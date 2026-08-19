@@ -68,3 +68,21 @@ class HybridStorage {
 }
 
 export const upload = multer({ storage: new HybridStorage() });
+
+/**
+ * The same storage engine for user-file uploads, but with limits — which the media upload above has
+ * never had, leaving the 413 branch in routes/misc.js unreachable.
+ *
+ * These are a protocol backstop against a runaway request, not the policy: the per-user quota is
+ * settings-driven and checked in the handler, because multer needs its limits at construction time
+ * and cannot consult the database per request.
+ *
+ * `files: 1` because the file route deliberately takes one file per request — that keeps per-file
+ * progress and per-file retry, which a batch destroys, and means the server never parses a
+ * client-supplied directory path.
+ */
+export const MAX_USER_FILE_BYTES = 5 * 1024 * 1024 * 1024;
+export const uploadUserFile = multer({
+    storage: new HybridStorage(),
+    limits: { fileSize: MAX_USER_FILE_BYTES, files: 1, fields: 20, parts: 25 },
+});
