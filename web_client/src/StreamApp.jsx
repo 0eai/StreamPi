@@ -123,7 +123,7 @@ export default function StreamApp() {
                 onLogout={handleLogout}
             />
             <UploadWizard isOpen={isUploadModalOpen} onClose={() => setIsUploadModalOpen(false)} onStartUpload={uploads.handleStartUpload} token={token} serverUrl={SERVER_URL} />
-            <UploadQueue queue={uploads.uploads} onRemove={uploads.removeUpload} onRetry={uploads.retryUpload} onClearCompleted={uploads.clearCompletedUploads} />
+            <UploadQueue queue={uploads.uploads} onRemove={uploads.removeUpload} onRetry={uploads.retryUpload} onCancel={uploads.cancelUpload} onClearCompleted={uploads.clearCompletedUploads} />
             <ShareModal shareLink={shareLink} onClose={() => setShareLink(null)} />
             <CastModal item={castItem} onClose={() => setCastItem(null)} serverUrl={SERVER_URL} token={token} />
 
