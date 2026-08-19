@@ -32,10 +32,18 @@ const ddlFor = (table) => {
     return match[0];
 };
 
+/** The live-name uniqueness is a separate partial index, so it has to be applied separately too. */
+const liveNameIndex = () => {
+    const match = /CREATE UNIQUE INDEX IF NOT EXISTS idx_file_nodes_live_name[\s\S]*?deleted_at IS NULL/.exec(dbSource);
+    if (!match) throw new Error('Could not find idx_file_nodes_live_name in db.js');
+    return match[0];
+};
+
 let db;
 beforeEach(() => {
     db = new Database(':memory:');
     db.exec(ddlFor('file_nodes'));
+    db.exec(liveNameIndex());
     db.exec(ddlFor('file_shares'));
 });
 
@@ -82,6 +90,25 @@ describe('file_nodes', () => {
         // Whereas with a real root as the parent, duplicates are rejected as intended.
         insertNode({ id: 'x', parent_id: 'r1', name: 'Docs' });
         expect(() => insertNode({ id: 'y', parent_id: 'r1', name: 'Docs' })).toThrow(/UNIQUE/);
+    });
+
+    it('is case-insensitive, so the database agrees with the application check', () => {
+        insertNode({ id: 'a', name: 'Docs' });
+        expect(() => insertNode({ id: 'b', name: 'docs' })).toThrow(/UNIQUE/);
+    });
+
+    it('stops reserving a name once the row is trashed', () => {
+        // Why the uniqueness is a partial index rather than an inline UNIQUE: a table-level
+        // constraint applies to trashed rows too, so a deleted file would hold its name for the
+        // whole grace period and re-uploading it — the obvious recovery — would fail.
+        insertNode({ id: 'a', name: 'notes.txt', deleted_at: '2026-08-19T00:00:00.000Z' });
+        expect(() => insertNode({ id: 'b', name: 'notes.txt' })).not.toThrow();
+    });
+
+    it('still allows two trashed rows to share a name', () => {
+        // Deleting the same name twice over time is normal, and the index must not object.
+        insertNode({ id: 'a', name: 'x', deleted_at: 'then' });
+        expect(() => insertNode({ id: 'b', name: 'x', deleted_at: 'later' })).not.toThrow();
     });
 });
 

@@ -105,7 +105,7 @@ export const initDB = async () => {
         // Two things about the tree are worth reading before changing it:
         //
         // 1. Every user gets a real root row (parent_id IS NULL, name ''). The obvious alternative —
-        //    nullable parent_id for top-level items — silently breaks UNIQUE(parent_id, name),
+        //    nullable parent_id for top-level items — silently defeats the unique index below,
         //    because SQLite treats NULLs as distinct in a unique index, so the entire top level
         //    would accept duplicates.
         // 2. path_ids denormalizes the ancestor chain as '/rootid/aid/bid/'. Ids, never names, so a
@@ -129,8 +129,7 @@ export const initDB = async () => {
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 expires_at TEXT,
-                deleted_at TEXT,
-                UNIQUE (parent_id, name)
+                deleted_at TEXT
             );
         `);
         await db.run("CREATE INDEX IF NOT EXISTS idx_file_nodes_parent ON file_nodes(parent_id)");
@@ -139,6 +138,16 @@ export const initDB = async () => {
         await db.run("CREATE INDEX IF NOT EXISTS idx_file_nodes_expires ON file_nodes(expires_at)");
         await db.run("CREATE INDEX IF NOT EXISTS idx_file_nodes_deleted ON file_nodes(deleted_at)");
         await db.run("CREATE INDEX IF NOT EXISTS idx_file_nodes_storage ON file_nodes(storage_name)");
+        // Uniqueness scoped to LIVE rows, which an inline UNIQUE(parent_id, name) could not express:
+        // the table-level constraint applies to trashed rows too, so deleting a file would reserve
+        // its name for the whole grace period and "delete it and upload it again" — the most obvious
+        // recovery there is — would fail. NOCASE so the database agrees with the application check
+        // rather than disagreeing about "Docs" versus "docs".
+        //
+        // A partial index is also the more forgiving choice: unlike a CHECK, CREATE UNIQUE INDEX IF
+        // NOT EXISTS does apply to a database that already has the table.
+        await db.run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_file_nodes_live_name
+                        ON file_nodes(parent_id, name COLLATE NOCASE) WHERE deleted_at IS NULL`);
 
         // One table for both kinds of share, discriminated by `kind`, so expiry, revocation and
         // access counting are written once rather than twice.
