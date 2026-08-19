@@ -6,7 +6,8 @@ import { existsSync, mkdirSync } from 'fs';
 import https from 'https';
 
 import { TEMP_DIR, EXTERNAL_ROOT, CLIENT_BUILD_PATH, SSL_KEY_PATH, SSL_CERT_PATH } from './src/paths.js';
-import { PORT, HTTPS_PORT } from './src/config.js';
+import { PORT, HTTPS_PORT, FILES_PORT, FILES_HTTPS_PORT } from './src/config.js';
+import { createFileServer } from './src/fileServer.js';
 import { initDB, db, logActivity } from './src/db.js';
 import { initializeFirebaseAdmin, updateServerLocation } from './src/firebaseBootstrap.js';
 import { initTelegramListener } from './src/telegramService.js';
@@ -92,7 +93,7 @@ app.use(telegramRoutes);
 app.use(miscRoutes);
 
 // Referenced by gracefulShutdown() below — assigned once startServer() actually creates them.
-let httpServer, httpsServer;
+let httpServer, httpsServer, filesServer, filesHttpsServer;
 
 const startServer = async () => {
     try {
@@ -140,6 +141,29 @@ const startServer = async () => {
             httpsServer.setTimeout(28800000);
             httpsServer.keepAliveTimeout = 28800000;
             httpsServer.headersTimeout = 28800001;
+        } catch(e) {}
+    }
+
+    // A separate app on a separate port for uploaded file bytes — see fileServer.js for why the
+    // origin has to be different from the app's. Failing to bind must not take the server down with
+    // it: the whole media side works without this, and a port collision here should degrade to "file
+    // downloads are unavailable", not "StreamPi is dead".
+    const filesApp = createFileServer();
+    filesServer = filesApp.listen(FILES_PORT, '0.0.0.0', () => console.log(`📦 Files origin running on port ${FILES_PORT}`));
+    filesServer.on('error', (e) => console.error(`❌ Files origin failed to bind port ${FILES_PORT}: ${e.message}`));
+    // Large downloads over slow links need the same patience the media routes get.
+    filesServer.setTimeout(28800000);
+    filesServer.keepAliveTimeout = 28800000;
+    filesServer.headersTimeout = 28800001;
+
+    if (existsSync(SSL_KEY_PATH) && existsSync(SSL_CERT_PATH)) {
+        try {
+            filesHttpsServer = https.createServer({ key: await fs.readFile(SSL_KEY_PATH), cert: await fs.readFile(SSL_CERT_PATH) }, filesApp)
+                .listen(FILES_HTTPS_PORT, '0.0.0.0', () => console.log(`🔒 Files origin (HTTPS) running on port ${FILES_HTTPS_PORT}`));
+            filesHttpsServer.on('error', (e) => console.error(`❌ Files HTTPS origin failed to bind: ${e.message}`));
+            filesHttpsServer.setTimeout(28800000);
+            filesHttpsServer.keepAliveTimeout = 28800000;
+            filesHttpsServer.headersTimeout = 28800001;
         } catch(e) {}
     }
 
@@ -220,6 +244,11 @@ const gracefulShutdown = (signal) => {
     console.log(`\n${signal} received — closing server...`);
     if (httpServer) httpServer.close(() => console.log("HTTP server closed."));
     if (httpsServer) httpsServer.close();
+    // The files origin has to close too, or a restart leaves its port bound by the dying process
+    // long enough for the new one to fail to bind it — which would silently mean "file downloads
+    // don't work" from the first restart onwards.
+    if (filesServer) filesServer.close(() => console.log("Files origin closed."));
+    if (filesHttpsServer) filesHttpsServer.close();
     setTimeout(() => process.exit(0), 10000);
 };
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));

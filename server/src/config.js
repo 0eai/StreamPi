@@ -28,6 +28,12 @@ export const FIREBASE_DB_URL = env('FIREBASE_DB_URL');
 // defaulting to the original hardcoded values when absent.
 export const PORT = Number(env('PORT', '3005'));
 export const HTTPS_PORT = Number(env('HTTPS_PORT', '3006'));
+// A separate origin for serving user-uploaded bytes. Separate specifically so that anything the
+// browser renders from a stored file runs on an origin that holds no session token — localStorage is
+// keyed by origin, so a script inside an uploaded file cannot read the app's credentials from here.
+// Same http/https pairing as above; the https listener only comes up when the certs exist.
+export const FILES_PORT = Number(env('FILES_PORT', '3007'));
+export const FILES_HTTPS_PORT = Number(env('FILES_HTTPS_PORT', '3008'));
 export const MANUAL_PUBLIC_URL = env('PUBLIC_URL');
 
 // Kunji wallet auth. Neither value is a secret — the callback is a public Cloud Run endpoint
