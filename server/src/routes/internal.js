@@ -159,10 +159,41 @@ router.post('/api/internal/transcode-complete', async (req, res) => {
 
     try {
         const originalPath = Buffer.from(fileId, 'base64').toString('utf8');
-        if (!isUnderRoot(originalPath, JOB_PATH_ROOTS)) return res.status(400).json({ error: "Invalid fileId" });
+
+        /**
+         * An in-place transcode's source lives *on the node*, so this fileId always decodes to a
+         * `nas://<nodeId>/<filename>` URI — transcodeQueue builds it from job.path, which is exactly
+         * that, and this route serves no other kind of job. It can therefore never be "under" a local
+         * filesystem root, and the isUnderRoot check that used to guard it rejected every completion
+         * with a 400.
+         *
+         * The damage was invisible here and permanent at the node, because the node renames its output
+         * over the source and deletes the original *before* posting this callback: the file became
+         * .mp4 while the media row still said .mkv, so playback and poster extraction both 404'd
+         * against a name that no longer existed, and the row sat in remote_processing forever.
+         *
+         * Validated as what it actually is instead — a node may only finalize a file on itself. The
+         * UPDATE's row count carries the rest, since a path this node does not own cannot match one.
+         */
+        const ownPrefix = `nas://${nodeId}/`;
+        if (!originalPath.startsWith(ownPrefix)) return res.status(400).json({ error: "fileId is not a file on this node" });
+        if (!isSafeFilename(originalPath.slice(ownPrefix.length))) return res.status(400).json({ error: "Invalid fileId" });
+
         const finalPath = `nas://${nodeId}/${finalFilename}`;
 
-        await db.run("UPDATE media SET path = ?, filename = ?, transcode_status = 'completed' WHERE path = ?", [finalPath, finalFilename, originalPath]);
+        const result = await db.run("UPDATE media SET path = ?, filename = ?, transcode_status = 'completed' WHERE path = ?", [finalPath, finalFilename, originalPath]);
+
+        /**
+         * A no-op update is not a success. By the time this is called the node has already renamed the
+         * file and deleted the source, so replying 200 to an update that matched nothing strands the
+         * pair permanently: the node records the job done and never retries, while the row goes on
+         * naming a file that is gone. Both names are logged so it can be repaired by hand, which is
+         * the only option left once the source has been deleted.
+         */
+        if (!result?.changes) {
+            await log(`⚠️ In-place transcode finalize matched no media row: ${originalPath} — node ${nodeId} now holds "${finalFilename}"`, 'WARN');
+            return res.status(409).json({ error: "No media row matches that path" });
+        }
 
         JOB_PROGRESS.delete(originalPath);
         await log(`✅ In-place transcode finalized on ${nodeId}: ${finalFilename}`);
