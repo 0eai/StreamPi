@@ -104,13 +104,23 @@ export const checkSingleNode = async (node) => {
     node.statusDirect = false;
     node.statusTunnel = false;
 
+    /**
+     * A whitelist, not a wholesale copy — unlike checkNasHealth above, which assigns res.data
+     * directly. That inconsistency is a trap worth naming: anything added to the transcoder side of a
+     * node's /stats payload has to be added *here too*, or it is dropped silently between the node
+     * reporting it and the dashboard reading it. `work` was, and the disk column stayed empty with the
+     * field present and correct at both ends.
+     */
     const updateStats = (data) => {
         node.hardware = data.hardware;
         node.stats = {
             cpu: data.cpu,
             ram: data.ram,
             network: data.network,
-            uptime: data.uptime
+            uptime: data.uptime,
+            // Scratch space for transcode jobs. Deliberately not `disk`, which on a NAS node means a
+            // configured quota rather than a real filesystem.
+            work: data.work
         };
         if (data.busy) {
             // If worker is busy but server doesn't know why, mark as External

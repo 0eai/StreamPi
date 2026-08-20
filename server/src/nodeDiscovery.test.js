@@ -31,7 +31,8 @@ vi.mock('./db.js', () => ({
 // fails inside its own try/catch rather than reaching the network.
 vi.mock('axios');
 
-const { initNodeDiscoveryListener, getBestNasNode, getNasNodeById } = await import('./nodeDiscovery.js');
+const axios = (await import('axios')).default;
+const { initNodeDiscoveryListener, getBestNasNode, getNasNodeById, checkSingleNode } = await import('./nodeDiscovery.js');
 
 const snapshot = async (nodes) => listener({ val: () => nodes });
 
@@ -182,5 +183,61 @@ describe('NAS node selection', () => {
         // so allow it".
         KNOWN_NAS_NODES.set('nostats', { id: 'nostats', isReachable: true, stats: null });
         expect(getNasNodeById('nostats', 1).error).toBe('full');
+    });
+});
+
+/**
+ * The stats copy is a whitelist while checkNasHealth's is a wholesale assignment, so a field can be
+ * correct at the node and correct in the dashboard payload and still never arrive. That is exactly
+ * what happened to `work`, which is why this is pinned rather than left to the two ends agreeing.
+ */
+describe('checkSingleNode stats', () => {
+    const PAYLOAD = {
+        hardware: 'Apple (VideoToolbox)',
+        cpu: 3, ram: { percent: 94 }, network: { up: 0, down: 0 }, uptime: 72,
+        work: { path: '/Users/monus/.../transcoder_work', free: 48318382080, total: 245111386112, staged: 0 },
+        busy: false,
+    };
+
+    beforeEach(() => {
+        axios.get.mockReset();
+        axios.get.mockResolvedValue({ data: PAYLOAD });
+    });
+
+    it('carries scratch-space stats through to the node entry', async () => {
+        const node = { id: 'mac', apiKey: 'k', url: 'http://127.0.0.1:14501' };
+        await checkSingleNode(node);
+        expect(node.stats.work).toEqual(PAYLOAD.work);
+    });
+
+    it('still carries the fields it always did', async () => {
+        const node = { id: 'mac', apiKey: 'k', url: 'http://127.0.0.1:14501' };
+        await checkSingleNode(node);
+        expect(node.stats).toMatchObject({ cpu: 3, uptime: 72, ram: { percent: 94 } });
+        expect(node.hardware).toBe('Apple (VideoToolbox)');
+    });
+
+    it('leaves work undefined for a node that reports none, rather than inventing zeroes', async () => {
+        // A node with no transcoder role sends no `work`, and the dashboard renders an em dash for it.
+        axios.get.mockResolvedValue({ data: { ...PAYLOAD, work: undefined } });
+        const node = { id: 'nas-only', apiKey: 'k', url: 'http://nas:4500' };
+        await checkSingleNode(node);
+        expect(node.stats.work).toBeUndefined();
+    });
+
+    it('reaches a tunnelled node through its url when there is no direct address', async () => {
+        const node = { id: 'mac', apiKey: 'k', url: 'http://127.0.0.1:14501' };
+        await checkSingleNode(node);
+        expect(axios.get).toHaveBeenCalledWith('http://127.0.0.1:14501/stats', expect.anything());
+        expect(node.isReachable).toBe(true);
+        expect(node.statusTunnel).toBe(true);
+    });
+
+    it('marks a node unreachable when both paths fail, without stale stats surviving', async () => {
+        axios.get.mockRejectedValue(new Error('ETIMEDOUT'));
+        const node = { id: 'mac', apiKey: 'k', url: 'http://127.0.0.1:14501', failedStrikes: 0 };
+        await checkSingleNode(node);
+        expect(node.isReachable).toBe(false);
+        expect(node.failedStrikes).toBe(1);
     });
 });
