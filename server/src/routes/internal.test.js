@@ -70,8 +70,10 @@ const complete = (body) => fetch(`${origin}/api/internal/transcode-complete`, {
 
 beforeEach(async () => {
     raw = new Database(':memory:');
-    raw.exec('CREATE TABLE media (path TEXT PRIMARY KEY, filename TEXT, transcode_status TEXT)');
-    raw.prepare("INSERT INTO media (path, filename, transcode_status) VALUES (?, ?, 'remote_processing')")
+    raw.exec('CREATE TABLE media (path TEXT PRIMARY KEY, filename TEXT, transcode_status TEXT, poster_attempts INTEGER DEFAULT 0)');
+    // 5 is posterHealer's give-up cap, which is where a title lands after its source could not be
+    // read — exactly the state the real stranded row was in.
+    raw.prepare("INSERT INTO media (path, filename, transcode_status, poster_attempts) VALUES (?, ?, 'remote_processing', 5)")
         .run(nasPath('orin2', MKV), MKV);
     logLines.length = 0;
     JOB_PROGRESS.clear();
@@ -95,6 +97,14 @@ describe('POST /api/internal/transcode-complete', () => {
         // The row must now name the file the node actually holds.
         expect(row(nasPath('orin2', MKV))).toBeUndefined();
         expect(row(nasPath('orin2', MP4))).toMatchObject({ filename: MP4, transcode_status: 'completed' });
+    });
+
+    it('clears a spent poster-attempt count, since this is a different file now', async () => {
+        // posterHealer stores its give-up count on the row and never retries past the cap, so without
+        // this the transcoded copy — usually the more extractable of the two, since an unseekable
+        // container is why it was queued in the first place — would never be tried.
+        await complete({ fileId: idFor(nasPath('orin2', MKV)), nodeId: 'orin2', secret: KEYS.orin2, finalFilename: MP4 });
+        expect(row(nasPath('orin2', MP4)).poster_attempts).toBe(0);
     });
 
     it('clears the progress entry for the old path', async () => {

@@ -181,7 +181,18 @@ router.post('/api/internal/transcode-complete', async (req, res) => {
 
         const finalPath = `nas://${nodeId}/${finalFilename}`;
 
-        const result = await db.run("UPDATE media SET path = ?, filename = ?, transcode_status = 'completed' WHERE path = ?", [finalPath, finalFilename, originalPath]);
+        /**
+         * poster_attempts is reset because this is a *different file* now — new container, new name,
+         * re-encoded video. posterHealer gives up permanently after five failures and stores the count
+         * on the row, so without this a title whose poster could not be extracted from the source
+         * would never be tried again against the transcoded copy, even though that copy is frequently
+         * the more extractable of the two: the usual reason for the original failing is a container or
+         * codec the poster path cannot seek, which is the same reason it was queued for transcode.
+         */
+        const result = await db.run(
+            "UPDATE media SET path = ?, filename = ?, transcode_status = 'completed', poster_attempts = 0 WHERE path = ?",
+            [finalPath, finalFilename, originalPath]
+        );
 
         /**
          * A no-op update is not a success. By the time this is called the node has already renamed the
