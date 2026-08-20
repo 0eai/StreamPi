@@ -35,6 +35,15 @@ const chain = () => {
     };
     return self;
 };
+// getAvailableFormats is a static on the module, not part of the chain. `formats` is the object
+// fluent-ffmpeg caches internally, which is why mutating it works at all.
+let formats = {};
+let formatsError = null;
+let getFormatsCalls = 0;
+chain.getAvailableFormats = (cb) => {
+    getFormatsCalls += 1;
+    setImmediate(() => cb(formatsError, formatsError ? undefined : formats));
+};
 vi.mock('fluent-ffmpeg', () => ({ default: chain }));
 
 let deviceExists = true;
@@ -60,12 +69,51 @@ beforeEach(() => {
     probeCalls = [];
     deviceExists = true;
     cfg = {};
+    // No lavfi: the state a newer ffmpeg build leaves fluent-ffmpeg's parser in.
+    formats = { mp4: { canDemux: true, canMux: true }, null: { canDemux: false, canMux: true } };
+    formatsError = null;
+    getFormatsCalls = 0;
     // HW_CONFIG is a shared mutable object by design, so it has to be reset between tests.
     Object.assign(HW_CONFIG, {
         encoder: 'libx264',
         inputOptions: [],
         options: ['-preset ultrafast', '-crf 23', '-pix_fmt yuv420p', '-movflags +faststart'],
         description: 'CPU Software Encoding',
+    });
+});
+
+describe('the lavfi workaround', () => {
+    /**
+     * fluent-ffmpeg's -formats parser accounts for two flag columns; newer ffmpeg prints a third
+     * "device" column, so `D d lavfi` fails its regexp outright and fluent-ffmpeg rejects every probe
+     * with "Input format lavfi is not available" before spawning anything. lavfi is how all of them
+     * build a test clip, so this looked like absent hardware — or an absent ffmpeg — on the one
+     * machine whose build has that column.
+     */
+    it('adds the missing lavfi entry so the probes can run at all', async () => {
+        await detectHardware();
+        expect(formats.lavfi).toMatchObject({ canDemux: true });
+    });
+
+    it('patches before probing, not after', async () => {
+        probeResults = { h264_nvenc: true };
+        await detectHardware();
+        expect(getFormatsCalls).toBe(1);
+        // The probe still happened, which it could not have if the order were wrong on a real build.
+        expect(probeCalls).toHaveLength(1);
+    });
+
+    it('leaves an existing lavfi entry alone, since an older build parses it correctly', async () => {
+        formats.lavfi = { canDemux: true, canMux: false, description: 'original' };
+        await detectHardware();
+        expect(formats.lavfi.description).toBe('original');
+    });
+
+    it('carries on when the format list cannot be read at all', async () => {
+        // ffmpeg missing entirely: nothing to patch, and reporting it is detectHardware's job.
+        formatsError = new Error('Cannot find ffmpeg');
+        await expect(detectHardware()).resolves.toBeUndefined();
+        expect(HW_CONFIG.description).toBe('ffmpeg unavailable — transcoding will fail');
     });
 });
 
@@ -81,10 +129,11 @@ describe('detectHardware', () => {
     });
 
     it('says ffmpeg is unavailable when even libx264 fails, rather than claiming CPU encoding', async () => {
-        // The Mac node's exact state: every probe failed because ffmpeg was not on the process's
-        // PATH, and it went on reporting "CPU Software Encoding" — a fallback needing the same
-        // binary that just proved unreachable. It accepted jobs it could not run, and the dashboard
-        // showed a healthy transcoder.
+        // The Mac node's exact state before the lavfi fix above: every probe failed, and it reported
+        // that as "CPU Software Encoding" — a fallback needing the same ffmpeg that had just failed
+        // six times. It accepted jobs it could not run and showed a healthy transcoder. This check is
+        // what turned it into a diagnosable symptom; the cause turned out to be the format-list
+        // parsing, not a missing binary.
         await detectHardware();
         expect(HW_CONFIG.description).toBe('ffmpeg unavailable — transcoding will fail');
         expect(probeCalls).toHaveLength(6);

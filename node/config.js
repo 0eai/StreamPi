@@ -50,9 +50,12 @@ export const WORK_DIR = CFG.workDir || path.join(__dirname, 'transcoder_work');
  * config file you already had to edit". The launcher is the part that varies — launchd, systemd, pm2,
  * a terminal — and it is exactly where a PATH goes missing.
  *
- * That is not hypothetical. The Mac node could encode with h264_videotoolbox from a shell and failed
- * every probe as a service, because Homebrew installs to /opt/homebrew/bin, which is on a login
- * shell's PATH and not on the PATH of a launched process.
+ * Homebrew installing to /opt/homebrew/bin is the usual case — that directory is on a login shell's
+ * PATH and not on the PATH of a launched process, so ffmpeg works when you try it by hand and is
+ * invisible to the service. (The Mac node looked like this and turned out to be something else
+ * entirely: fluent-ffmpeg could not parse `lavfi` out of that build's format list. This knob was not
+ * what fixed it, and is kept because the PATH problem it addresses is real and otherwise needs the
+ * launcher edited.)
  *
  * Verified executable at boot rather than trusted, whichever source it came from, because an unusable
  * path fails misleadingly: every encoder probe fails, and the node used to report that as "CPU

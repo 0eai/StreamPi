@@ -244,13 +244,19 @@ Four optional fields are worth knowing about:
   contract than "put it in the config file you already had to edit" — and the launcher is precisely
   what varies.
 
-  The symptom to recognise: every encoder probe fails, the node reports `ffmpeg unavailable —
-  transcoding will fail`, and ffmpeg works perfectly when you try it by hand. Homebrew's
-  `/opt/homebrew/bin` is the usual culprit — it is on a login shell's PATH and not on a launchd,
+  Homebrew's `/opt/homebrew/bin` is the usual culprit — on a login shell's PATH, not on a launchd,
   systemd, or pm2-at-boot process's. A path that is not executable is complained about and then
   ignored rather than stopping the node, because a node holding the `nas` role still serves and
   stores files without ffmpeg, and killing it would make everything already archived there
   unplayable.
+
+  If the node reports `ffmpeg unavailable — transcoding will fail` while ffmpeg works perfectly by
+  hand, PATH is only one candidate. The other is fluent-ffmpeg's `-formats` parser, which accounts for
+  two flag columns and not the third "device" column newer ffmpeg builds print — so `lavfi`, the
+  virtual input every encoder probe uses to synthesise a test clip, fails its regexp and is reported
+  as not existing before ffmpeg is ever spawned. `patchLavfiFormat` in
+  [hardware.js](node/hardware.js) works around that in-process. It reproduces only on builds new
+  enough to have that column.
 
 On hardware acceleration: VAAPI on an Intel iGPU measured *slower* than `libx264 -preset ultrafast` on
 a 20-core CPU here, but produced output less than half the size. For a node that uploads every result
