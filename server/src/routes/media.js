@@ -11,6 +11,7 @@ import { verifyToken } from '../middleware.js';
 import { KNOWN_NAS_NODES } from '../state.js';
 import { resolveNasFile, withNasAvailability, isNasNodeAvailable } from '../nasSource.js';
 import { ffmpegAuthHeader } from '../ffmpegAuth.js';
+import { forgetNasProbe } from '../remoteProbe.js';
 import { extractMetadata, parseFilename } from '../mediaMetadata.js';
 import { cleanupEmptyDirs, processDirectToNodeFile } from '../mediaPipeline.js';
 import { checkTranscodeQueue } from '../transcodeQueue.js';
@@ -803,6 +804,7 @@ router.delete('/api/media', verifyToken, async (req, res) => {
          * both the node and the filename, which is what makes a leftover recoverable.
          */
         if (filePath.startsWith('nas://')) {
+            forgetNasProbe(filePath);
             const nas = resolveNasFile(filePath);
             if (!nas.ok) {
                 await log(`⚠️ Deleted row for ${filePath} but its node is unreachable — the file is still on it.`, 'WARN');

@@ -9,6 +9,7 @@ import { ACTIVE_STREAMS } from './state.js';
 import { contentDispositionFor } from './contentDisposition.js';
 import { resolveNasFile, parseNasPath } from './nasSource.js';
 import { ffmpegAuthHeader } from './ffmpegAuth.js';
+import { probeNasFile } from './remoteProbe.js';
 import { shouldLogWatch, watchLogKey } from './watchLogThrottle.js';
 import { checkTranscodeQueue } from './transcodeQueue.js';
 
@@ -67,15 +68,21 @@ export const streamMediaFile = async (req, res, filePath, { username, role } = {
 
     let fileMetadata;
     try {
-        fileMetadata = await new Promise((resolve, reject) => {
-            if (!isNas && existsSync(filePath)) {
-                ffmpeg.ffprobe(filePath, (err, data) => {
-                    if (err) reject(err); else resolve(data);
-                });
-            } else {
-                resolve(null);
-            }
-        });
+        fileMetadata = isNas
+            // Probed (and cached) rather than guessed. Without this a NAS file fell back to
+            // `endsWith('.mp4') && track === 0`, which is wrong both ways: a NAS .mp4 holding HEVC was
+            // called direct-play to clients that cannot decode it, and everything else got
+            // encode-both even when only the audio needed changing.
+            ? await probeNasFile(filePath)
+            : await new Promise((resolve, reject) => {
+                if (existsSync(filePath)) {
+                    ffmpeg.ffprobe(filePath, (err, data) => {
+                        if (err) reject(err); else resolve(data);
+                    });
+                } else {
+                    resolve(null);
+                }
+            });
     } catch (e) {}
 
     let isDirectPlay = false;
@@ -257,10 +264,9 @@ export const streamMediaFile = async (req, res, filePath, { username, role } = {
 
             if (startTime) ffmpegCommand.seekInput(startTime);
 
-            // fileMetadata is never populated for NAS-hosted files today (only local
-            // files get probed above), so this always falls back to encode-both — same
-            // behavior as before. Left as-is rather than adding a remote ffprobe call,
-            // which is a bigger change than this fix calls for.
+            // fileMetadata IS populated for NAS files now (remoteProbe, cached), so this makes the
+            // same per-stream copy-vs-encode decision as a local file: video is copied when it is
+            // already h264 and only the audio is re-encoded, instead of both unconditionally.
             const { videoCodec, audioCodec } = pickTranscodeCodecs(fileMetadata, requestedTrack, supportsH264, supportsHEVC, supportsAAC);
             const outputOpts = ['-map 0:v:0', `-map 0:a:${requestedTrack}?`, '-movflags frag_keyframe+empty_moov'];
             if (videoCodec !== 'copy') outputOpts.push('-preset ultrafast', '-crf 28', '-tune zerolatency');

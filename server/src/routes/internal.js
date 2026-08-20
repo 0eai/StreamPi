@@ -11,6 +11,7 @@ import { TEMP_DIR, MEDIA_ROOT, EXTERNAL_ROOT, isUnderRoot, isSafeFilename } from
 const JOB_PATH_ROOTS = [MEDIA_ROOT, EXTERNAL_ROOT];
 import { db, verifyNodeKey } from '../db.js';
 import { JOB_PROGRESS } from '../state.js';
+import { forgetNasProbe } from '../remoteProbe.js';
 import { log } from '../logger.js';
 import { checkTranscodeQueue } from '../transcodeQueue.js';
 import { upload } from '../uploadMiddleware.js';
@@ -207,6 +208,9 @@ router.post('/api/internal/transcode-complete', async (req, res) => {
         }
 
         JOB_PROGRESS.delete(originalPath);
+        // This nas:// path is retired — the row now names the .mp4. Dropping its cached probe stops a
+        // later file reusing that exact name from inheriting this one's stream layout.
+        forgetNasProbe(originalPath);
         await log(`✅ In-place transcode finalized on ${nodeId}: ${finalFilename}`);
         checkTranscodeQueue();
         res.json({ success: true });
