@@ -15,7 +15,7 @@ import { extractMetadata, parseFilename } from '../mediaMetadata.js';
 import { cleanupEmptyDirs, processDirectToNodeFile } from '../mediaPipeline.js';
 import { checkTranscodeQueue } from '../transcodeQueue.js';
 import { getBestNasNode, getNasNodeById } from '../nodeDiscovery.js';
-import { hasFreeSpace, sendServerError } from '../logger.js';
+import { hasFreeSpace, sendServerError, log } from '../logger.js';
 import { upload } from '../uploadMiddleware.js';
 
 const router = express.Router();
@@ -791,7 +791,34 @@ router.delete('/api/media', verifyToken, async (req, res) => {
         await db.run('DELETE FROM history WHERE media_path = ?', [filePath]);
         await db.run('DELETE FROM shares WHERE media_path = ?', [filePath]);
 
-        if (existsSync(filePath)) await fs.unlink(filePath).catch(() => {});
+        /**
+         * A nas:// path is not a filesystem path, so the unlink below silently did nothing for an
+         * archived item: the row went away and the bytes stayed on the node, still counted against its
+         * quota, with nothing left referencing them. The only way to find such an orphan afterwards is
+         * to diff the node's /api/files against the media table by hand.
+         *
+         * The remote delete is attempted but not allowed to fail the request. The row is already gone
+         * by this point, and refusing here would leave a row that cannot be deleted while its node is
+         * down or decommissioned — a worse trap than an orphan. So the outcome is logged loudly with
+         * both the node and the filename, which is what makes a leftover recoverable.
+         */
+        if (filePath.startsWith('nas://')) {
+            const nas = resolveNasFile(filePath);
+            if (!nas.ok) {
+                await log(`⚠️ Deleted row for ${filePath} but its node is unreachable — the file is still on it.`, 'WARN');
+            } else {
+                try {
+                    await axios.delete(`${nas.node.url}/file/${encodeURIComponent(nas.filename)}`, {
+                        headers: { Authorization: `Bearer ${nas.apiKey}` },
+                        timeout: 15000,
+                    });
+                } catch (e) {
+                    await log(`⚠️ Deleted row for ${filePath} but the node refused to remove the file (${e.message}) — it is still on ${nas.nodeId}.`, 'WARN');
+                }
+            }
+        } else if (existsSync(filePath)) {
+            await fs.unlink(filePath).catch(() => {});
+        }
         if (item.poster) {
             const thumbPath = path.join(THUMB_FOLDER, item.poster);
             if (existsSync(thumbPath)) await fs.unlink(thumbPath).catch(() => {});
