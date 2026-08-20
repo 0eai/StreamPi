@@ -47,6 +47,34 @@ describe('useUploads', () => {
     beforeEach(() => { instances.length = 0; vi.stubGlobal('XMLHttpRequest', FakeXhr); });
     afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
+    it('sends direct-to-node uploads one at a time', async () => {
+        // A node bounds concurrent /archive writes at maxConcurrentNasJobs, default 1. Three in
+        // parallel had it 503 the surplus, which reached the user as "Upload failed (500)" on a
+        // perfectly good file. Retrying server-side is not an option: the body is already being
+        // consumed by then, so replaying it would mean buffering the whole file.
+        const { result } = render();
+        act(() => {
+            result.current.handleStartUpload(
+                ['a', 'b', 'c'].map((n) => ({ ...fileItem(`${n}.mp4`), destination: 'nas', nodeId: 'n1' }))
+            );
+        });
+        await act(async () => {});
+        expect(instances).toHaveLength(1);
+
+        // The next only starts once the first is done — succeed() is the harness's helper.
+        await act(async () => { instances[0].succeed('{"success":true}'); });
+        expect(instances).toHaveLength(2);
+    });
+
+    it('still sends ordinary uploads three at a time', async () => {
+        const { result } = render();
+        act(() => {
+            result.current.handleStartUpload(['a', 'b', 'c', 'd'].map((n) => fileItem(`${n}.mp4`)));
+        });
+        await act(async () => {});
+        expect(instances).toHaveLength(3);
+    });
+
     it('runs at most three at a time, starting the next as each finishes', async () => {
         // The behaviour folder upload depends on: 400 files must not open 400 requests.
         const { result } = render();

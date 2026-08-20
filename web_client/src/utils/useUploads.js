@@ -22,6 +22,24 @@ import { randomId } from './randomId';
  */
 const MAX_CONCURRENT = 3;
 
+/**
+ * Direct-to-node uploads go one at a time regardless.
+ *
+ * A node bounds concurrent /archive writes with maxConcurrentNasJobs, whose default is 1 and which is
+ * 2 even where it has been raised — because an archive write is a long heavy transfer and that gate
+ * exists to stop several of them fighting over one disk. Sending three in parallel therefore had the
+ * node 503 the surplus, which surfaced to the user as "Upload failed (500)" on an upload that was
+ * perfectly valid and would have succeeded a moment later.
+ *
+ * Retrying on the server is not available: by the time the node answers 503 the multipart body is
+ * already being consumed, and replaying it would mean buffering the whole file — gigabytes, for a
+ * transfer whose entire point is never touching the server's disk. Not queueing past the node's own
+ * limit is the fix that needs no buffer.
+ */
+const MAX_CONCURRENT_TO_NODE = 1;
+
+const concurrencyFor = (item) => (item?.destination === 'nas' ? MAX_CONCURRENT_TO_NODE : MAX_CONCURRENT);
+
 const buildFormData = (item) => {
     const formData = new FormData();
 
@@ -114,7 +132,10 @@ export const useUploads = (token, serverUrl, onUploadComplete) => {
     }, [serverUrl, onUploadComplete, patch]);
 
     const pump = useCallback((authToken) => {
-        while (runningRef.current < MAX_CONCURRENT && queueRef.current.length) {
+        // The limit is read from the item at the head of the queue, so a batch aimed at a node
+        // serialises while an ordinary upload still gets three at a time. A mixed batch is bounded by
+        // whichever is next, which is the conservative reading.
+        while (queueRef.current.length && runningRef.current < concurrencyFor(queueRef.current[0])) {
             start(queueRef.current.shift(), authToken);
         }
     }, [start]);

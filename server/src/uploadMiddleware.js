@@ -36,7 +36,22 @@ const streamToNode = (nasNode, nodeId, file, cb) => {
         timeout: 4 * 60 * 60 * 1000
     })
         .then(() => cb(null, { size, isDirectToNode: true, nodeId }))
-        .catch((err) => { passthrough.destroy(); cb(new Error(`Failed to stream to node: ${err.message}`)); });
+        .catch((err) => {
+            passthrough.destroy();
+            /**
+             * A 503 from the node is its /archive concurrency gate, not a bad upload: the file is fine
+             * and the same request would succeed once a slot frees. Said plainly, because the generic
+             * wrapper turned it into "Upload failed (500)" and left the user with nothing to act on
+             * beyond a Retry button they had no reason to trust.
+             *
+             * The client now serialises direct-to-node uploads so this should be rare, but a second
+             * client, or a restore running at the same time, can still take the slot.
+             */
+            if (err.response?.status === 503) {
+                return cb(new Error(`Node ${nodeId} is busy with another transfer — try this upload again in a moment.`));
+            }
+            cb(new Error(`Failed to stream to node: ${err.message}`));
+        });
 };
 
 // Branches per file on req.body.destination — 'nas' streams straight to the chosen node
