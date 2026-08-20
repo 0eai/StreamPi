@@ -146,10 +146,21 @@ router.post('/api/admin/nodes', verifyToken, async (req, res) => {
     } catch (e) { sendServerError(res, e); }
 });
 
+/**
+ * super_admin only, unlike every other node route here.
+ *
+ * Ownership is meant to be established at the node itself: /api/node-owner/:id/claim asks for that
+ * node's API key, which is the one thing separating "I run this machine" from "I can load its page" —
+ * the node's dashboard is served unauthenticated, so anyone on the LAN can reach it. This route is the
+ * only way ownership can be set *without* that proof, which makes it the exception to the rule the
+ * claim flow exists to enforce rather than a peer of the other admin actions.
+ *
+ * It stays because claim matches only an unowned node, so with no way to clear the field a node whose
+ * owner's account was deleted could never be claimed by anyone again. Narrowing who can reach it keeps
+ * that escape hatch without leaving every admin able to hand themselves a box they have no access to.
+ */
 router.post('/api/admin/nodes/:id/owner', verifyToken, async (req, res) => {
-    if (req.user.role !== 'super_admin' && req.user.role !== 'admin') {
-        return res.status(403).json({ error: "Access Denied" });
-    }
+    if (req.user.role !== 'super_admin') return res.status(403).json({ error: "Access Denied" });
     const { ownerUserId } = req.body;
     try {
         const node = await db.get("SELECT * FROM nodes WHERE id = ?", req.params.id);

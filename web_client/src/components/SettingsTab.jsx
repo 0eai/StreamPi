@@ -399,7 +399,12 @@ const SettingsTab = ({ token, serverUrl, username, role, onLogout }) => {
                                                             <ExternalLink className="w-3 h-3" /> Open
                                                         </a>
                                                     )}
-                                                    <button onClick={() => setTransferNode(n)} className="text-xs text-green-500 hover:text-green-400 font-medium mr-3">Transfer</button>
+                                                    {/* super_admin only, matching the route. Ownership is meant to be claimed at the
+                                                        node with its API key; this is the one path that sets it without that proof,
+                                                        so an admin who sees the button would only get a 403 from it. */}
+                                                    {role === 'super_admin' && (
+                                                        <button onClick={() => setTransferNode(n)} className="text-xs text-green-500 hover:text-green-400 font-medium mr-3">Transfer</button>
+                                                    )}
                                                     <button onClick={() => handleRegenerateNode(n)} className="text-xs text-yellow-500 hover:text-yellow-400 font-medium mr-3">Regenerate</button>
                                                     <button onClick={() => handleRemoveNode(n)} className="text-xs text-red-500 hover:text-red-400 font-medium">Remove</button>
                                                 </td>
