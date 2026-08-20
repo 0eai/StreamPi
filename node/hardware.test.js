@@ -70,11 +70,31 @@ beforeEach(() => {
 });
 
 describe('detectHardware', () => {
-    it('falls back to CPU when nothing works, which is this machine without a pin', async () => {
+    it('falls back to CPU when no hardware encoder works but ffmpeg does', async () => {
+        probeResults = { libx264: true };
         await detectHardware();
         expect(HW_CONFIG).toMatchObject(CPU_DEFAULT);
         expect(HW_CONFIG.inputOptions).toEqual([]);
-        expect(probeCalls).toHaveLength(5);
+        // Five hardware encoders, then libx264 to establish that ffmpeg itself works.
+        expect(probeCalls).toHaveLength(6);
+        expect(probeCalls[5].encoder).toBe('libx264');
+    });
+
+    it('says ffmpeg is unavailable when even libx264 fails, rather than claiming CPU encoding', async () => {
+        // The Mac node's exact state: every probe failed because ffmpeg was not on the process's
+        // PATH, and it went on reporting "CPU Software Encoding" — a fallback needing the same
+        // binary that just proved unreachable. It accepted jobs it could not run, and the dashboard
+        // showed a healthy transcoder.
+        await detectHardware();
+        expect(HW_CONFIG.description).toBe('ffmpeg unavailable — transcoding will fail');
+        expect(probeCalls).toHaveLength(6);
+    });
+
+    it('does not probe libx264 when a hardware encoder already worked', async () => {
+        // The check only earns its keep in the failing case; it must not add a probe to every boot.
+        probeResults = { h264_vaapi: true };
+        await detectHardware();
+        expect(probeCalls.map((c) => c.encoder)).not.toContain('libx264');
     });
 
     it('probes with the options a real job would use, not the bare codec name', async () => {

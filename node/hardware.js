@@ -75,5 +75,27 @@ export const detectHardware = async () => {
         }
         console.log("❌ Failed/Not Available");
     }
-    console.log("⚠️  No GPU detected. Falling back to CPU.");
+
+    /**
+     * Every hardware probe failing has two very different causes, and they were reported identically.
+     *
+     * One is ordinary: a machine with no supported GPU, where libx264 is the right answer. The other
+     * is that ffmpeg cannot be run at all — and then the CPU "fallback" is not a fallback, because
+     * that path needs the same binary. The node went on advertising "CPU Software Encoding" and
+     * accepting jobs it had no way to perform, and the dashboard showed nothing amiss.
+     *
+     * Found on the Mac node: `h264_videotoolbox` encodes fine in a shell there, and every probe
+     * failed anyway, because Homebrew's /opt/homebrew/bin is on the PATH of a login shell and not of
+     * whatever launched the node. One extra probe in the already-failing case tells the two apart.
+     */
+    if (await testEncoder('libx264', [], ['-preset ultrafast'])) {
+        console.log("⚠️  No GPU detected. Falling back to CPU.");
+        return;
+    }
+
+    Object.assign(HW_CONFIG, { description: 'ffmpeg unavailable — transcoding will fail' });
+    console.error("❌ ffmpeg could not encode with libx264 either — it is missing, not executable, or built without it.");
+    console.error("   Transcode jobs sent to this node will fail. Set FFMPEG_PATH and FFPROBE_PATH to");
+    console.error("   absolute paths if ffmpeg is not on this process's PATH (a login shell's PATH is not");
+    console.error("   the one a launchd/systemd/pm2-at-boot process gets).");
 };
