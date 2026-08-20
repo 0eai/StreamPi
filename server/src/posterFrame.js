@@ -65,9 +65,16 @@ export const extractPosterFrame = async ({ source, duration, thumbFolder, thumbN
         ? CANDIDATE_FRACTIONS.map((f) => Math.max(1, Math.floor(duration * f)))
         : [5];
 
+    // The .try marker goes BEFORE the extension, not after. ffmpeg picks the output format from the
+    // extension, so `poster.jpg.try0` gives it nothing to work with and it fails instantly with no
+    // frame written — which is exactly what happened when this first shipped, and what a fluent-ffmpeg
+    // mock could never have caught.
+    const ext = path.extname(thumbName) || '.jpg';
+    const stem = thumbName.slice(0, thumbName.length - ext.length);
+
     let best = null;
     for (const [i, seconds] of offsets.entries()) {
-        const attemptPath = `${finalPath}.try${i}`;
+        const attemptPath = path.join(thumbFolder, `${stem}.try${i}${ext}`);
         const ok = await grabOne(source, seconds, attemptPath, inputOptions);
         if (!ok || !existsSync(attemptPath)) continue;
 

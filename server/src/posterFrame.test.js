@@ -82,6 +82,19 @@ describe('extractPosterFrame', () => {
         expect(fs.readdirSync(dir)).toEqual(['out.jpg']);
     });
 
+    it('keeps the image extension on every attempt file', async () => {
+        // The regression this exists for: attempts were written as `poster.jpg.try0`, and ffmpeg picks
+        // the output format from the extension — "Unable to choose an output format" and no frame at
+        // all. It shipped, because mocking fluent-ffmpeg means never asking real ffmpeg whether it can
+        // write the path. Verified against real ffmpeg separately; this keeps the invariant honest.
+        sizeFor = (s) => ({ 100: 900, 250: 1500, 500: 1100 })[s];
+        await run(1000);
+        expect(attempts).toHaveLength(3);
+        for (const a of attempts) {
+            expect(a.outPath, a.outPath).toMatch(/\.jpg$/);
+        }
+    });
+
     it('uses the thumbnail filter, which is what avoids blanks within a candidate', async () => {
         await run(1000);
         expect(attempts[0].out.join(' ')).toContain('thumbnail=100');
