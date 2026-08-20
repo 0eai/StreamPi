@@ -70,7 +70,9 @@ export const runLocalRemux = async (inputPath, outputPath) => {
 
     const outputOptions = [
         '-map 0:v:0',           // 1st Video
-        '-map 0:a',             // All Audio
+        // Optional (?) because ffmpeg exits 234 when a map matches nothing, so a video with no audio
+        // track failed to remux at all rather than remuxing without audio.
+        '-map 0:a?',            // All Audio, if any
         '-c:v copy',            // Video Copy
         '-c:a copy',            // Audio Copy
         '-movflags +faststart'

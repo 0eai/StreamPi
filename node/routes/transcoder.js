@@ -7,6 +7,7 @@ import { spawn } from 'child_process';
 import { ID, API_KEY, IS_NAS, WORK_DIR, recordJobHistory } from '../config.js';
 import { HW_CONFIG, JOB_STATE } from '../state.js';
 import { findFileLocation } from '../storage.js';
+import { planTranscode } from '../transcodePlan.js';
 import { withTransientRetry } from '../retry.js';
 
 const router = express.Router();
@@ -82,17 +83,7 @@ router.post('/job', async (req, res) => {
 
         try {
             const metadata = await new Promise((resolve, reject) => ffmpeg.ffprobe(sourcePath, (err, meta) => err ? reject(err) : resolve(meta)));
-            let isVideoH264 = false, isAllAudioAAC = true, hasAudio = false;
-            const SAFE_SUBTITLES = ['mov_text', 'subrip', 'ass', 'ssa', 'webvtt'];
-            const mapOptions = ['-map 0:v:0', '-map 0:a'];
-            let subtitleCount = 0;
-
-            for (const stream of metadata.streams) {
-                if (stream.codec_type === 'video' && stream.codec_name === 'h264') isVideoH264 = true;
-                if (stream.codec_type === 'audio') { hasAudio = true; if (stream.codec_name !== 'aac') isAllAudioAAC = false; }
-                if (stream.codec_type === 'subtitle' && SAFE_SUBTITLES.includes(stream.codec_name)) { mapOptions.push(`-map 0:${stream.index}`); subtitleCount++; }
-            }
-            if (!hasAudio) isAllAudioAAC = true;
+            const { mapOptions, isVideoH264, isAllAudioAAC, subtitleCount } = planTranscode(metadata.streams);
 
             const command = ffmpeg(sourcePath);
             command.outputOptions(mapOptions);
@@ -181,17 +172,7 @@ router.post('/job', async (req, res) => {
             if (fs.existsSync(outputTemp)) fs.unlinkSync(outputTemp);
 
             const metadata = await new Promise((resolve, reject) => ffmpeg.ffprobe(inputPath, (err, meta) => err ? reject(err) : resolve(meta)));
-            let isVideoH264 = false, isAllAudioAAC = true, hasAudio = false;
-            const SAFE_SUBTITLES = ['mov_text', 'subrip', 'ass', 'ssa', 'webvtt'];
-            const mapOptions = ['-map 0:v:0', '-map 0:a'];
-            let subtitleCount = 0;
-
-            for (const stream of metadata.streams) {
-                if (stream.codec_type === 'video' && stream.codec_name === 'h264') isVideoH264 = true;
-                if (stream.codec_type === 'audio') { hasAudio = true; if (stream.codec_name !== 'aac') isAllAudioAAC = false; }
-                if (stream.codec_type === 'subtitle' && SAFE_SUBTITLES.includes(stream.codec_name)) { mapOptions.push(`-map 0:${stream.index}`); subtitleCount++; }
-            }
-            if (!hasAudio) isAllAudioAAC = true;
+            const { mapOptions, isVideoH264, isAllAudioAAC, subtitleCount } = planTranscode(metadata.streams);
 
             const command = ffmpeg(inputPath);
             command.outputOptions(mapOptions);
