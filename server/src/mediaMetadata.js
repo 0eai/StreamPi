@@ -4,6 +4,7 @@ import { execFile } from 'child_process';
 import ffmpeg from 'fluent-ffmpeg';
 import { THUMB_FOLDER } from './paths.js';
 import { ffmpegAuthHeader } from './ffmpegAuth.js';
+import { extractPosterFrame } from './posterFrame.js';
 
 export const parseFilename = (filename) => {
     const seriesMatch = filename.match(/(.+?)[ .][sS](\d{1,2})[eE](\d{1,2})/i);
@@ -18,7 +19,6 @@ export const extractMetadata = (filePath) => {
         const thumbPath = path.join(THUMB_FOLDER, thumbName);
 
         let settled = false;
-        let screenshotCmd = null;
         const finish = (result) => {
             if (settled) return;
             settled = true;
@@ -33,13 +33,15 @@ export const extractMetadata = (filePath) => {
         // sequentially, one hung file would otherwise freeze the entire library scan — same
         // reasoning already applied to extractMetadataRemote, just without a process handle
         // to kill during the ffprobe phase specifically.
+        // The frame grab kills its own ffmpeg per attempt (posterFrame.js), so there is no command
+        // handle to kill here any more — this remains as the outer bound on the whole sequence,
+        // which is the part fluent-ffmpeg's ffprobe shorthand still gives no way to interrupt.
         const overallTimer = setTimeout(() => {
-            if (screenshotCmd) { try { screenshotCmd.kill('SIGKILL'); } catch (e) {} }
             console.error(`❌ Metadata extraction timed out for ${filePath}`);
             finish({ duration: 0, poster: null, needsTranscode: true });
         }, 20000);
 
-        ffmpeg.ffprobe(filePath, (err, metadata) => {
+        ffmpeg.ffprobe(filePath, async (err, metadata) => {
             if (settled) return;
             const duration = !err && metadata ? metadata.format.duration : 0;
             const hasH264 = metadata && metadata.streams.some(s => s.codec_name === 'h264');
@@ -47,14 +49,14 @@ export const extractMetadata = (filePath) => {
             const needsTranscode = !(hasH264 && hasAAC && path.extname(filePath) === '.mp4');
             if (existsSync(thumbPath)) return finish({ duration, poster: thumbName, needsTranscode });
 
-            screenshotCmd = ffmpeg(filePath)
-                // `duration`, not 0 — ffprobe already succeeded by this point; only the
-                // screenshot step failed. Discarding a perfectly good duration here (as this
-                // used to) is exactly how a poster-generation failure under load also took the
-                // duration down with it, with nothing afterward to ever recover either one.
-                .on('error', () => finish({ duration, poster: null, needsTranscode }))
-                .on('end', () => finish({ duration, poster: thumbName, needsTranscode }))
-                .screenshots({ count: 1, timestamps: ['10%'], folder: THUMB_FOLDER, filename: thumbName, size: '320x?' });
+            // Same frame selection as the NAS path. A dark scene at 10% is not a remote-only
+            // problem — it is a property of films — so a local upload deserves the same treatment.
+            // `duration`, not 0, on failure: ffprobe already succeeded by this point and only the
+            // frame grab failed. Discarding a perfectly good duration here (as this used to) is
+            // how a poster failure under load also took the duration down with it, with nothing
+            // afterward to recover either one.
+            const ok = await extractPosterFrame({ source: filePath, duration, thumbFolder: THUMB_FOLDER, thumbName });
+            finish({ duration, poster: ok ? thumbName : null, needsTranscode });
         });
     });
 };
@@ -74,7 +76,7 @@ export const extractMetadataRemote = (fileUrl, apiKey, thumbName) => {
         execFile('ffprobe', [
             '-v', 'quiet', '-print_format', 'json', '-show_streams', '-show_format',
             '-headers', ffmpegAuthHeader(apiKey), fileUrl
-        ], { timeout: 15000 }, (err, stdout) => {
+        ], { timeout: 15000 }, async (err, stdout) => {
             let duration = 0, needsTranscode = true;
             try {
                 const metadata = JSON.parse(stdout);
@@ -87,36 +89,19 @@ export const extractMetadataRemote = (fileUrl, apiKey, thumbName) => {
 
             if (existsSync(thumbPath)) return resolve({ duration, poster: thumbName, needsTranscode });
 
-            // fluent-ffmpeg has no built-in timeout option, so this enforces one manually.
-            // No trailing CRLF. ffmpeg strips a trailing \n and appends its own \r\n, so a value
-            // ending in \r\n arrives as `Authorization: Bearer <key>\r` — a header with a stray bare
-            // CR in it, which Node's parser rejects with a 400 before serving a byte. Captured off the
-            // wire: `...Bearer TESTKEY\r\r\n\r\n`. That is why every NAS poster extraction failed
-            // instantly while the ffprobe call two lines above, which omits the CRLF, always worked —
-            // hence rows with a correct duration and no poster.
-            const cmd = ffmpeg(fileUrl).inputOptions(['-headers', ffmpegAuthHeader(apiKey)]);
-            const timer = setTimeout(() => { try { cmd.kill('SIGKILL'); } catch (e) {} }, 15000);
-            cmd.on('error', () => { clearTimeout(timer); resolve({ duration, poster: null, needsTranscode }); })
-                .on('end', () => { clearTimeout(timer); resolve({ duration, poster: thumbName, needsTranscode }); })
-                /**
-                 * An absolute offset in seconds, never a percentage. fluent-ffmpeg resolves a '10%'
-                 * timemark by calling its own .ffprobe(), which spawns
-                 *   ffprobe -show_streams -show_format <url>
-                 * and does NOT pass this command's inputOptions along — so that probe goes out with no
-                 * Authorization header, the node answers 403, and the screenshot is abandoned before
-                 * ffmpeg ever runs. A second, independent reason every NAS poster failed: fixing the
-                 * header alone did not cure it.
-                 *
-                 * The duration is already known from the authenticated ffprobe above, so the percentage
-                 * is computed here rather than delegated. The 5s fallback covers that probe having
-                 * failed too — a long shot, but better than seeking to 0, which on many films is a
-                 * black frame or a fade-in.
-                 */
-                .screenshots({
-                    count: 1,
-                    timestamps: [duration > 0 ? Math.max(1, Math.floor(duration * 0.1)) : 5],
-                    folder: THUMB_FOLDER, filename: thumbName, size: '320x?'
-                });
+            // extractPosterFrame instead of fluent-ffmpeg's .screenshots(): that recipe resolves a
+            // percentage timemark by calling its own .ffprobe(), which does not inherit these input
+            // options and so hits the node unauthenticated (403). It also hands back whatever single
+            // frame sits at the offset, which for a dark scene is a near-black image. Both dealt with
+            // in one place now, shared with the local path.
+            const ok = await extractPosterFrame({
+                source: fileUrl,
+                duration,
+                thumbFolder: THUMB_FOLDER,
+                thumbName,
+                inputOptions: ['-headers', ffmpegAuthHeader(apiKey)],
+            });
+            resolve({ duration, poster: ok ? thumbName : null, needsTranscode });
         });
     });
 };
