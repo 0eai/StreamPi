@@ -14,7 +14,13 @@ export const getLocalIp = () => {
     const interfaces = os.networkInterfaces();
     for (const name of Object.keys(interfaces)) {
         if (name.startsWith('tun') || name.startsWith('tap') || name.startsWith('ppp') || name.startsWith('wg')) continue;
-        for (const iface of interfaces[name]) if (iface.family === 'IPv4' && !iface.internal) return iface.address;
+        // Link-local (169.254.0.0/16) means the interface never got a DHCP lease — an unplugged
+        // Thunderbolt Bridge or a dormant iPhone-USB interface on a Mac, both of which sort ahead of
+        // the real Wi-Fi interface here. It is not internal, so the check above admits it, and the
+        // node then publishes an address nothing can route with no error anywhere to say so.
+        // Found in practice on the Mac node, which advertised one of these instead of its LAN address.
+        const usable = interfaces[name].find((i) => i.family === 'IPv4' && !i.internal && !i.address.startsWith('169.254.'));
+        if (usable) return usable.address;
     }
     return '127.0.0.1';
 };

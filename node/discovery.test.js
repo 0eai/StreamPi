@@ -64,6 +64,37 @@ describe('getLocalIp', () => {
         expect(getLocalIp()).toBe('203.253.25.77');
     });
 
+    it('skips a link-local address, which means no DHCP lease', async () => {
+        // Real case from the Mac node: a Thunderbolt Bridge with no cable in it sorts ahead of the
+        // Wi-Fi interface and is not `internal`, so it was published as the node's address.
+        ifaces = {
+            bridge0: [{ family: 'IPv4', internal: false, address: '169.254.13.7' }],
+            en0: [{ family: 'IPv4', internal: false, address: '10.21.30.53' }],
+        };
+        const { getLocalIp } = await load();
+        expect(getLocalIp()).toBe('10.21.30.53');
+    });
+
+    it('keeps looking past a link-local address on the same interface', async () => {
+        // An interface can carry both; taking the first IPv4 found would still lose here.
+        ifaces = {
+            en0: [
+                { family: 'IPv4', internal: false, address: '169.254.99.1' },
+                { family: 'IPv4', internal: false, address: '10.21.30.53' },
+            ],
+        };
+        const { getLocalIp } = await load();
+        expect(getLocalIp()).toBe('10.21.30.53');
+    });
+
+    it('falls back to loopback when link-local is all there is', async () => {
+        // Better than publishing 169.254.x: the server rejects a loopback it cannot reach either way,
+        // but 127.0.0.1 is at least obviously wrong in the log rather than plausibly right.
+        ifaces = { bridge0: [{ family: 'IPv4', internal: false, address: '169.254.13.7' }] };
+        const { getLocalIp } = await load();
+        expect(getLocalIp()).toBe('127.0.0.1');
+    });
+
     it('skips loopback', async () => {
         ifaces = {
             lo: [{ family: 'IPv4', internal: true, address: '127.0.0.1' }],
