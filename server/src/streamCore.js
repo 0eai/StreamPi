@@ -8,6 +8,7 @@ import { logActivity } from './db.js';
 import { ACTIVE_STREAMS } from './state.js';
 import { contentDispositionFor } from './contentDisposition.js';
 import { resolveNasFile, parseNasPath } from './nasSource.js';
+import { shouldLogWatch, watchLogKey } from './watchLogThrottle.js';
 import { checkTranscodeQueue } from './transcodeQueue.js';
 
 // Decides copy-vs-encode per stream for the transcode fallback below. Reuses the same
@@ -167,7 +168,11 @@ export const streamMediaFile = async (req, res, filePath, { username, role } = {
 
     ACTIVE_STREAMS.set(streamId, streamInfo);
 
-    if (username && role != "super_admin") {
+    // Throttled, because a <video> element opens several range requests to begin playback and another
+    // on every seek and rebuffer — this logged each one, so a single sitting produced dozens of
+    // identical rows and buried every other kind of entry.
+    if (username && role != "super_admin"
+        && shouldLogWatch(watchLogKey({ sessionId: streamInfo.sessionId, username, filePath }))) {
         await logActivity(username, "WATCH", `Started watching: ${path.basename(filePath)}`, clientIp);
     }
 
