@@ -7,6 +7,7 @@ import { PassThrough } from 'stream';
 import multer from 'multer';
 import { TEMP_DIR } from './paths.js';
 import { KNOWN_NAS_NODES } from './state.js';
+import { decodeMultipartFilename } from './multipartFilename.js';
 
 if (!existsSync(TEMP_DIR)) mkdirSync(TEMP_DIR, { recursive: true });
 
@@ -19,7 +20,10 @@ if (!existsSync(TEMP_DIR)) mkdirSync(TEMP_DIR, { recursive: true });
 const streamToNode = (nasNode, nodeId, file, cb) => {
     const passthrough = new PassThrough();
     const form = new FormData();
-    form.append('file', passthrough, { filename: file.originalname });
+    // The recovered name, not the raw one. Forwarding busboy's latin-1 reading meant the node's own
+    // busboy mangled it a second time on the way to disk, leaving the file under a different name than
+    // the media row recorded — which is precisely why an in-place transcode could not find it.
+    form.append('file', passthrough, { filename: decodeMultipartFilename(file.originalname) });
 
     let size = 0;
     file.stream.on('data', (chunk) => { size += chunk.length; });

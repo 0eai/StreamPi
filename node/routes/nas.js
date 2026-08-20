@@ -6,6 +6,7 @@ import ffmpeg from 'fluent-ffmpeg';
 import { RUNTIME, ACTIVE_UPLOADS, ACTIVE_DOWNLOADS, RESERVED_BYTES_BY_LOCATION, HW_CONFIG } from '../state.js';
 import { isSafeFilename, findFileLocation, pickPlacementLocation } from '../storage.js';
 import { createConcurrencyGate } from '../concurrencyGate.js';
+import { decodeMultipartFilename } from '../multipartFilename.js';
 
 const router = express.Router();
 
@@ -32,6 +33,10 @@ const trackedStorage = multer.diskStorage({
         // file.originalname is the attacker-controlled multipart filename field — multer's
         // own disk storage does no containment check, so an unsanitized name here is a
         // straight path-traversal write (e.g. overwriting this app's own index.js).
+        // busboy latin-1-decodes this too, so a name the server already corrected arrives mangled
+        // again. Recovered here so the file lands on disk under the name the server's media row holds;
+        // when the two disagreed this node could not find its own file for an in-place transcode.
+        file.originalname = decodeMultipartFilename(file.originalname);
         if (!isSafeFilename(file.originalname)) return cb(new Error("Invalid filename"));
         ACTIVE_UPLOADS.set(file.originalname, {
             totalSize: parseInt(req.headers['content-length'] || '0'),

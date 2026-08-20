@@ -5,6 +5,7 @@ import { db, initDB, logActivity, getSetting } from '../db.js';
 import { verifyToken } from '../middleware.js';
 import { sendServerError } from '../logger.js';
 import { storagePathFor } from '../paths.js';
+import { decodeMultipartFilename } from '../multipartFilename.js';
 import { uploadUserFile } from '../uploadMiddleware.js';
 import { mintFileToken, canRenderInline } from '../fileServer.js';
 import { effectiveExpiry } from '../fileTree.js';
@@ -271,7 +272,9 @@ router.post('/api/files/upload', verifyToken, (req, res, next) => {
 
         const owner = req.user.username;
         const parentId = req.body?.parentId || (await ownRoot(req)).id;
-        const name = req.body?.name || req.file.originalname;
+        // Same latin-1 recovery as the media upload — an accented or dashed filename would
+        // otherwise be stored mojibaked and shown that way to whoever the file is shared with.
+        const name = req.body?.name || decodeMultipartFilename(req.file.originalname);
 
         // Quota before anything is moved into place. It can overshoot by up to the concurrency the
         // client allows, since parallel uploads each see the same pre-upload total — bounded by the

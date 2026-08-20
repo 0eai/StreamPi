@@ -11,6 +11,7 @@ import { verifyToken } from '../middleware.js';
 import { KNOWN_NAS_NODES } from '../state.js';
 import { resolveNasFile, withNasAvailability, isNasNodeAvailable } from '../nasSource.js';
 import { ffmpegAuthHeader } from '../ffmpegAuth.js';
+import { decodeMultipartFilename } from '../multipartFilename.js';
 import { forgetNasProbe } from '../remoteProbe.js';
 import { extractMetadata, parseFilename } from '../mediaMetadata.js';
 import { cleanupEmptyDirs, processDirectToNodeFile } from '../mediaPipeline.js';
@@ -441,7 +442,11 @@ router.post('/api/upload', verifyToken, (req, res, next) => { req.setTimeout(360
             // file.originalname is the attacker-controlled multipart filename field — without
             // stripping any directory portion, a name like "../../.stream_db/media.db" would
             // rename the upload to a path outside the intended media tree.
-            const safeFilename = path.basename(decodeURIComponent(file.originalname));
+            // decodeMultipartFilename first: busboy hands the filename over latin-1-decoded, so a
+            // non-ASCII title arrives as its UTF-8 bytes one-per-character. Recovering that before
+            // anything else is what keeps this name identical to the one uploadMiddleware sends on to a
+            // node — they diverged before, and the node then could not find its own file.
+            const safeFilename = path.basename(decodeURIComponent(decodeMultipartFilename(file.originalname)));
 
             // Streamed straight to a NAS node by the storage engine (uploadMiddleware.js) —
             // never touched local disk, so none of the rename/extractMetadata/targetDir
