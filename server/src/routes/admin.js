@@ -177,10 +177,17 @@ router.post('/api/admin/nodes/:id/owner', verifyToken, async (req, res) => {
     } catch (e) { sendServerError(res, e); }
 });
 
+/**
+ * super_admin only, matching /owner above and for a sharper version of the same reason.
+ *
+ * This is what actually dispossesses whoever held the old key — clearing ownership alone does not,
+ * since the node's /api/config hands its raw apiKey back to anyone who can already authenticate, so a
+ * former owner keeps a working copy. It is also the more disruptive of the two: the node keeps using
+ * the old key until someone edits its node_config.json and restarts it, so a regenerate performed by
+ * someone who cannot reach the machine leaves it unable to register or accept work.
+ */
 router.post('/api/admin/nodes/:id/regenerate', verifyToken, async (req, res) => {
-    if (req.user.role !== 'super_admin' && req.user.role !== 'admin') {
-        return res.status(403).json({ error: "Access Denied" });
-    }
+    if (req.user.role !== 'super_admin') return res.status(403).json({ error: "Access Denied" });
     try {
         const node = await db.get("SELECT * FROM nodes WHERE id = ?", req.params.id);
         if (!node) return res.status(404).json({ error: "Node not found" });
