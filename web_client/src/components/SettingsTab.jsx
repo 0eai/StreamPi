@@ -375,6 +375,23 @@ const SettingsTab = ({ token, serverUrl, username, role, onLogout }) => {
                                                                 <div className={`h-full transition-all duration-500 ${n.disk.percent > 90 ? 'bg-red-500' : 'bg-orange-500'}`} style={{ width: `${n.disk.percent}%` }} />
                                                             </div>
                                                         </>
+                                                    ) : n.work ? (
+                                                        /* A transcoder with no nas role has no quota to report, but it does have
+                                                           scratch space — and that is the number that decides whether its next
+                                                           job can run at all, since a job holds its input and output at the same
+                                                           time. Shown as free space rather than a percentage bar: this filesystem
+                                                           is shared with whatever else lives on that disk, so "83% full" would
+                                                           mostly be describing someone else's data, while "12 GB free" is the
+                                                           fact that matters. */
+                                                        <>
+                                                            <div className="flex justify-between text-[10px] text-gray-400 mb-1">
+                                                                <span className="uppercase tracking-wide text-gray-500">Scratch</span>
+                                                                <span className={n.work.free < 5 * 1024 ** 3 ? 'text-red-400 font-bold' : ''}>{formatBytes(n.work.free)} free</span>
+                                                            </div>
+                                                            <div className="text-[9px] text-gray-600" title={n.work.path}>
+                                                                {n.work.staged > 0 ? `${formatBytes(n.work.staged)} staged` : 'idle'}
+                                                            </div>
+                                                        </>
                                                     ) : <span className="text-gray-600 text-xs">—</span>}
                                                 </td>
                                                 <td className="px-6 py-3 text-xs">

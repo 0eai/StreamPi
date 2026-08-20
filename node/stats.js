@@ -2,9 +2,9 @@ import fs from 'fs';
 import fsp from 'fs/promises';
 import os from 'os';
 import path from 'path';
-import { ID, ROLES, IS_TRANSCODER, IS_NAS } from './config.js';
+import { ID, ROLES, IS_TRANSCODER, IS_NAS, WORK_DIR } from './config.js';
 import { HW_CONFIG, JOB_STATE, ACTIVE_UPLOADS, ACTIVE_DOWNLOADS, ACTIVE_MIGRATIONS, RUNTIME, STATS } from './state.js';
-import { getAllDiskStats } from './storage.js';
+import { getAllDiskStats, getWorkDirStats } from './storage.js';
 
 // ==========================================
 // SYSTEM MONITORING (merged: cpu/ram/network always, disk/jobs if nas, hw/job if transcoder)
@@ -64,6 +64,10 @@ export const buildStatsPayload = async () => {
         payload.hardware = HW_CONFIG.description;
         payload.busy = JOB_STATE.isTranscoding;      // read by checkSingleNode.updateStats on the main server
         payload.current_job = JOB_STATE.currentJobId || 'Idle';
+        // Reported under its own key rather than as `disk`, which means a NAS quota everywhere else.
+        // Running out here fails a job mid-encode instead of declining the next one, so the two are
+        // worth telling apart on the dashboard rather than sharing a number.
+        payload.work = await getWorkDirStats(WORK_DIR);
     }
 
     if (IS_NAS) {

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { apiFetch, parseJsonSafe } from './api';
 import { useNasTransferProgress } from './nas';
+import { usePolling } from './usePolling';
 import { useDialogs } from '../components/ui/dialogs';
 import { useToast } from '../components/ui/toast';
 import { formatBytes } from './format';
@@ -11,6 +12,14 @@ const EMPTY_LIBRARY = { continueWatching: [], movies: [], series: [] };
 // picked. Deliberately not '' — choose() resolves null on a dismissal, and a falsy option value could
 // not be told apart from one.
 const AUTO_NAS_NODE = 'auto';
+
+// Long, because /api/library is the whole collection and it changes rarely — this exists so another
+// person's upload appears on its own, not to make the view feel live.
+const LIBRARY_POLL_MS = 45000;
+// Explicit because usePolling's default ceiling is 30s, which is *below* the base above and would
+// leave this with no backoff at all. A server that has gone away should be asked every five minutes,
+// not every forty-five seconds.
+const LIBRARY_POLL_BACKOFF_MAX_MS = 5 * 60 * 1000;
 
 // A move's own fetch is what clears movingFilenames in the common case — but that promise (and
 // the plain React state it resolves into) lives only in this tab's JS context, so a refresh
@@ -31,7 +40,7 @@ const MOVE_GRACE_MS = 5000;
 // (delete/rename/move/toggle-privacy), all of which just re-fetch afterward. `onUnauthorized`
 // is called instead of directly handling logout, since that's session-level state this hook
 // has no business owning.
-export const useLibraryActions = (token, serverUrl, onUnauthorized) => {
+export const useLibraryActions = (token, serverUrl, onUnauthorized, { paused = false } = {}) => {
     // This is a hook, so it reaches the dialog/toast providers directly rather than having them
     // threaded down through every component that calls one of these actions.
     const { confirm, prompt, choose } = useDialogs();
@@ -83,8 +92,11 @@ export const useLibraryActions = (token, serverUrl, onUnauthorized) => {
     // and the effect underneath only ever wants "whichever fetchData exists on the render
     // where token changed," not a memoized identity. Matches the original component's exact
     // behavior before this hook existed.
-    const fetchData = async (t) => {
-        if (library.movies.length === 0) setLoading(true);
+    const fetchData = async (t, { background = false } = {}) => {
+        // A background refresh must not flash the spinner. The empty-library guard alone is not
+        // enough: on a genuinely empty library every poll would satisfy it and the screen would blink
+        // between "loading" and "no movies found" forever.
+        if (!background && library.movies.length === 0) setLoading(true);
         try {
             const libRes = await apiFetch(serverUrl, '/api/library', t);
 
@@ -123,13 +135,35 @@ export const useLibraryActions = (token, serverUrl, onUnauthorized) => {
         } catch (e) {
             console.error("Fetch Error:", e);
             setLoadError(true);
+            // usePolling decides its backoff from a rejection, so a polled call has to rethrow. The
+            // handlers that call this directly do not catch, hence only on the background path.
+            if (background) { setLoading(false); throw e; }
         }
         setLoading(false);
     };
 
-    useEffect(() => {
-        if (token) fetchData(token);
-    }, [token]);
+    /**
+     * The library used to be fetched exactly once, when the token appeared. Every other refresh was
+     * triggered by something *this* user did — a delete, a rename, a move, an upload finishing, the
+     * player closing — so anything another person added stayed invisible until you happened to act or
+     * reloaded the page. On a shared library that is most of the time.
+     *
+     * 45s rather than the 2s the admin dashboard uses: /api/library returns the whole collection with
+     * every episode, and it changes on the order of minutes at best. `paused` stops it during playback,
+     * where a refresh buys nothing and competes with the stream for the same connection.
+     *
+     * usePolling ticks immediately on mount, so it owns the initial load too — hence firstLoadRef,
+     * which lets exactly that first tick show the spinner. It also re-ticks whenever `paused` flips
+     * back, which conveniently means closing the player refreshes right away instead of waiting out
+     * the interval.
+     */
+    const firstLoadRef = useRef(true);
+    const libraryOffline = usePolling(async () => {
+        if (!token || paused) return;
+        const background = !firstLoadRef.current;
+        firstLoadRef.current = false;
+        await fetchData(token, { background });
+    }, LIBRARY_POLL_MS, [token, paused], { maxIntervalMs: LIBRARY_POLL_BACKOFF_MAX_MS });
 
     const resetLibrary = () => { setLibrary(EMPTY_LIBRARY); setSelectedSeries(null); };
 
@@ -344,7 +378,7 @@ export const useLibraryActions = (token, serverUrl, onUnauthorized) => {
 
     return {
         library, loadError, loading, selectedSeries, setSelectedSeries,
-        fetchData, resetLibrary, moveStatus, shareLink, setShareLink,
+        fetchData, resetLibrary, moveStatus, shareLink, setShareLink, libraryOffline,
         handleDelete, handleDeleteSeries, handleRenameMovie, handleRenameSeries, handleMove, handleTogglePrivacy, handleShare
     };
 };

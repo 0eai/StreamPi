@@ -70,6 +70,23 @@ describe('usePolling', () => {
         expect(fn).toHaveBeenCalledTimes(4);
     });
 
+    it('does not let the backoff ceiling drag the base interval down', async () => {
+        // The default ceiling is 30s, and the clamp applied at failures = 0 too, where the multiplier
+        // is 1 — so a caller asking to poll every 45s silently got 30s. Every existing caller polls
+        // faster than the default, so nothing surfaced it until the library poller went slower.
+        const fn = vi.fn().mockResolvedValue(undefined);
+        renderHook(() => usePolling(fn, 45000, []));
+        await act(async () => {});
+        expect(fn).toHaveBeenCalledTimes(1);
+
+        // Would already have ticked again here if the ceiling still won.
+        await act(async () => { await vi.advanceTimersByTimeAsync(30100); });
+        expect(fn).toHaveBeenCalledTimes(1);
+
+        await act(async () => { await vi.advanceTimersByTimeAsync(15000); });
+        expect(fn).toHaveBeenCalledTimes(2);
+    });
+
     it('stops scheduling further ticks after unmount', async () => {
         const fn = vi.fn().mockResolvedValue();
         const { unmount } = renderHook(() => usePolling(fn, 1000, []));

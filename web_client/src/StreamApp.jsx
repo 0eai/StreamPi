@@ -75,9 +75,12 @@ export default function StreamApp() {
         }).catch(() => { /* label stays as-is; nothing user-visible depends on it here */ });
     }, [token]);
 
-    const libraryActions = useLibraryActions(token, SERVER_URL, handleLogout);
-    // Polled separately from the library: node reachability changes while the page is
-    // open, and the library is fetched once per load.
+    // `paused` while a video is open, matching the stats poller below: a library refresh mid-stream
+    // buys nothing and competes with the playback request. Closing the player flips it back, which
+    // makes usePolling re-tick immediately rather than waiting out the interval.
+    const libraryActions = useLibraryActions(token, SERVER_URL, handleLogout, { paused: !!activeVideo });
+    // Polled separately from the library, and much faster: node reachability flips in seconds,
+    // while the library is on a 45s cycle because it returns the whole collection.
     const availableNodeIds = useNasAvailability(SERVER_URL, token);
     const { library, loadError, selectedSeries, setSelectedSeries, fetchData, moveStatus, shareLink, setShareLink, handleDelete, handleDeleteSeries, handleRenameMovie, handleRenameSeries, handleMove, handleTogglePrivacy, handleShare } = libraryActions;
 
@@ -105,10 +108,10 @@ export default function StreamApp() {
                     item={activeVideo}
                     token={token}
                     onPlayNext={(nextItem) => setActiveVideo(nextItem)}
-                    onClose={() => {
-                        setActiveVideo(null);
-                        fetchData(token); // Update progress bars without resetting scroll
-                    }}
+                    // No explicit refetch here any more: clearing activeVideo unpauses the library
+                    // poller, which ticks immediately on that dependency change and picks up the
+                    // watch progress this session just produced.
+                    onClose={() => setActiveVideo(null)}
                     serverUrl={SERVER_URL}
                 />
             )}

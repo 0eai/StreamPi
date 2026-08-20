@@ -28,7 +28,13 @@ export function usePolling(fn, baseIntervalMs, deps, { maxIntervalMs = 30000 } =
                 if (!cancelled) { failures += 1; setOffline(true); }
             }
             if (!cancelled) {
-                const delay = Math.min(baseIntervalMs * Math.pow(2, failures), maxIntervalMs);
+                // maxIntervalMs is a ceiling on the *backoff*, so it must never drag the base interval
+                // down: with the 30s default, a caller asking for a 45s poll silently got 30s — the
+                // clamp applied at failures = 0 too, where the multiplier is 1. Every existing caller
+                // polls faster than the default so none of them noticed, and a slower one would have
+                // had to measure the timers to find out.
+                const ceiling = Math.max(maxIntervalMs, baseIntervalMs);
+                const delay = Math.min(baseIntervalMs * Math.pow(2, failures), ceiling);
                 timer = setTimeout(tick, delay);
             }
         };

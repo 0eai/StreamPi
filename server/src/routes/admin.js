@@ -70,6 +70,11 @@ router.get('/api/admin/dashboard', verifyToken, async (req, res) => {
                 ram: t?.stats?.ram?.percent ?? n?.stats?.ram?.percent ?? 0,
                 network: t?.stats?.network || n?.stats?.network || { up: 0, down: 0 },
                 disk: n?.stats?.disk || null,
+                // Separate from `disk` on purpose. `disk` is a NAS quota being deliberately filled;
+                // this is the real filesystem a transcode job stages input and output on, where
+                // running out fails the job rather than declining the next one. A transcoder-only node
+                // reported neither before, so its disk cell was simply blank.
+                work: t?.stats?.work || null,
                 jobs: n?.stats?.jobs || [],
                 dashboardUrl: t?.activeUrl || n?.url || null,
                 ownerUserId: row.owner_user_id || null,

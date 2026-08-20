@@ -43,6 +43,42 @@ export const getLocationStats = async (loc) => {
     } catch (e) { return { id: loc.id, path: loc.path, free: 0, total: 0, used: 0, percent: 0 }; }
 };
 
+/**
+ * Scratch-space stats for the transcoder role, which had none — a transcoder-only node reported no
+ * disk figures at all, so the dashboard showed a blank cell for the one number that decides whether
+ * its next job can even run.
+ *
+ * Deliberately NOT shaped like getLocationStats, because it measures something different and
+ * conflating the two would mislead. There, free/total describe a quota being deliberately filled, and
+ * exhausting it means the node politely declines new archives. Here they are the real filesystem,
+ * nothing is reserved for us, and exhausting it means ffmpeg fails mid-encode. So `total` is the
+ * filesystem's size rather than a limit anyone chose, and `staged` counts only this node's own
+ * in-progress job files — not the filesystem's used bytes, which are mostly other people's.
+ *
+ * A job holds its input and its output at the same time, so roughly twice the largest source has to
+ * fit.
+ */
+export const getWorkDirStats = async (workDir) => {
+    try {
+        const stat = await fsp.statfs(workDir);
+        let staged = 0;
+        try {
+            for (const entry of await fsp.readdir(workDir)) {
+                try {
+                    const s = await fsp.stat(path.join(workDir, entry));
+                    if (s.isFile()) staged += s.size;
+                } catch (e) {}
+            }
+        } catch (e) {} // An unreadable directory is not fatal — the free-space figure still holds.
+        return { path: workDir, free: stat.bavail * stat.bsize, total: stat.blocks * stat.bsize, staged };
+    } catch (e) {
+        // statfs failing means the path is gone — a removable disk unmounted under a configured
+        // workDir. Zeroes rather than null, so the dashboard shows "0 B free" instead of a blank cell
+        // that reads identically to "this node has no scratch space to report".
+        return { path: workDir, free: 0, total: 0, staged: 0 };
+    }
+};
+
 // Aggregate across all locations. `free` is deliberately the MAX of any single location, not
 // the sum — a file can't span two disks, and the main server's node-picking logic (which only
 // ever reads this one number) needs to know what actually fits somewhere, not total headroom.
