@@ -43,6 +43,12 @@ const Poster = ({ item, onClick, onDelete, onEdit, onMove, onShare, onCast, onTo
 
         try {
             const res = await apiFetch(serverUrl, `/api/media/info?path=${encodeURIComponent(probePath)}`, token);
+            // A failed probe must not latch. fetchAttempted is set before the request so a hover cannot
+            // fire a second one, but leaving it set after a failure meant one bad response disabled
+            // metadata for this card until a full page reload — which is what "No metadata available"
+            // was really reporting for an item whose row had briefly pointed at a missing file. The
+            // flag is released here so a deliberate reopen of the info dialog tries again.
+            if (!res.ok) fetchAttempted.current = false;
             if (res.ok) {
                 const data = await res.json();
                 if (!item.path && item.episodes) {
@@ -52,6 +58,7 @@ const Poster = ({ item, onClick, onDelete, onEdit, onMove, onShare, onCast, onTo
             }
         } catch (e) {
             console.error("Meta fetch failed", e);
+            fetchAttempted.current = false;
         }
         setIsLoadingMeta(false);
     };
@@ -61,6 +68,9 @@ const Poster = ({ item, onClick, onDelete, onEdit, onMove, onShare, onCast, onTo
     // fetch has actually started, guarded by the same fetchAttempted ref either way.
     const handleShowInfo = (e) => {
         e.stopPropagation();
+        // Opening this deliberately is a request to retry, unlike a hover — a card that has been
+        // sitting on screen since before a problem was fixed should not stay blank forever.
+        if (!metadata) fetchAttempted.current = false;
         handleMouseEnter();
         setShowInfoModal(true);
     };
