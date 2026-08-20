@@ -44,12 +44,18 @@ export const checkNasHealth = async () => {
     await Promise.all(checks);
 };
 
+// Headroom kept free on a NAS node beyond the file itself. Named rather than inlined because an
+// explicitly chosen node has to clear exactly the same bar as an automatically chosen one — a hand
+// picked destination that quietly accepts a file the automatic path would have refused is worse than
+// no choice at all.
+const NAS_HEADROOM_BYTES = 1024 * 1024 * 1024;
+
 export const getBestNasNode = (requiredBytes) => {
     const nodes = Array.from(KNOWN_NAS_NODES.values());
 
     const candidates = nodes.filter(n => {
         const free = n.stats?.disk?.free || 0;
-        return free > requiredBytes + (1024*1024*1024); // +1GB Buffer
+        return free > requiredBytes + NAS_HEADROOM_BYTES;
     });
 
     if (candidates.length === 0) return null;
@@ -57,6 +63,24 @@ export const getBestNasNode = (requiredBytes) => {
     candidates.sort((a, b) => b.stats.disk.free - a.stats.disk.free);
 
     return candidates[0];
+};
+
+/**
+ * The same admission check as getBestNasNode, for one node the caller named.
+ *
+ * Returns `{ node }` or `{ error }` rather than just null, because the three ways a chosen node can
+ * be refused need different things said about them: an id that isn't a NAS node at all is a stale
+ * client, one that is unreachable may well work in a minute, and one that is full never will. A bare
+ * null would collapse all three into "couldn't do it", and the destination was the user's decision —
+ * they are owed the reason it didn't hold.
+ */
+export const getNasNodeById = (id, requiredBytes) => {
+    const node = KNOWN_NAS_NODES.get(id);
+    if (!node) return { error: 'unknown' };
+    if (!node.isReachable) return { error: 'unreachable' };
+    const free = node.stats?.disk?.free || 0;
+    if (free <= requiredBytes + NAS_HEADROOM_BYTES) return { error: 'full', free, headroom: NAS_HEADROOM_BYTES };
+    return { node };
 };
 
 // A node that's both a reachable NAS (with room) AND a reachable, idle transcoder can
@@ -68,7 +92,7 @@ export const getNodeForDirectDownload = (requiredBytes) => {
         const transcoderNode = KNOWN_NODES.get(id);
         if (!transcoderNode || !transcoderNode.isReachable || transcoderNode.activeJob !== null) continue;
         const free = nasNode.stats?.disk?.free || 0;
-        if (free <= requiredBytes + (1024 * 1024 * 1024)) continue; // +1GB buffer
+        if (free <= requiredBytes + NAS_HEADROOM_BYTES) continue;
         candidates.push({ id, nasNode, transcoderNode, free });
     }
     if (candidates.length === 0) return null;

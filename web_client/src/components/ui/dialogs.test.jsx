@@ -125,6 +125,78 @@ describe('prompt', () => {
     });
 });
 
+describe('choose', () => {
+    const OPTIONS = [
+        { value: 'auto', label: 'Automatic — node with the most free space' },
+        { value: 'orin2', label: 'orin2 — 150.0 GB free' },
+        { value: 'pi', label: 'pi — 9.8 GB free' },
+    ];
+    const open = (get, overrides = {}) =>
+        get().choose({ message: 'Move "A Film" off main storage?', label: 'Destination', options: OPTIONS, confirmLabel: 'Offload', ...overrides });
+
+    it('defaults to the first option, so Confirm alone does something sensible', async () => {
+        const get = renderDialogs();
+        let promise;
+        act(() => { promise = open(get); });
+
+        expect(await screen.findByText('Move "A Film" off main storage?')).toBeInTheDocument();
+        fireEvent.click(screen.getByText('Offload'));
+        await expect(promise).resolves.toBe('auto');
+    });
+
+    it('resolves the option that was picked', async () => {
+        const get = renderDialogs();
+        let promise;
+        act(() => { promise = open(get); });
+
+        fireEvent.change(await screen.findByLabelText('Destination'), { target: { value: 'orin2' } });
+        fireEvent.click(screen.getByText('Offload'));
+        await expect(promise).resolves.toBe('orin2');
+    });
+
+    it('resolves null on Cancel, not false', async () => {
+        // Following prompt rather than confirm: a caller has to be able to tell a dismissal from a
+        // choice, and every option value is a string.
+        const get = renderDialogs();
+        let promise;
+        act(() => { promise = open(get); });
+        fireEvent.click(await screen.findByText('Cancel'));
+        await expect(promise).resolves.toBeNull();
+    });
+
+    it('resolves null when dismissed from the header', async () => {
+        const get = renderDialogs();
+        let promise;
+        act(() => { promise = open(get); });
+        fireEvent.click(await screen.findByLabelText('Close'));
+        await expect(promise).resolves.toBeNull();
+    });
+
+    it('honours an explicit starting value', async () => {
+        const get = renderDialogs();
+        let promise;
+        act(() => { promise = open(get, { value: 'pi' }); });
+        fireEvent.click(await screen.findByText('Offload'));
+        await expect(promise).resolves.toBe('pi');
+    });
+
+    it('offers every option it was given', async () => {
+        const get = renderDialogs();
+        act(() => { open(get); });
+        const select = await screen.findByLabelText('Destination');
+        expect(select.querySelectorAll('option')).toHaveLength(3);
+        expect(select.innerHTML).toContain('150.0 GB free');
+    });
+
+    it('resolves a superseded choose as null', async () => {
+        const get = renderDialogs();
+        let first;
+        act(() => { first = open(get); });
+        act(() => { get().confirm('Something else?'); });
+        await expect(first).resolves.toBeNull();
+    });
+});
+
 describe('supersession', () => {
     it('resolves a superseded prompt as null, not false', async () => {
         // The cancel value has to come from the pending dialog's own kind, not the incoming one.

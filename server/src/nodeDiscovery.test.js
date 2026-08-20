@@ -31,7 +31,7 @@ vi.mock('./db.js', () => ({
 // fails inside its own try/catch rather than reaching the network.
 vi.mock('axios');
 
-const { initNodeDiscoveryListener } = await import('./nodeDiscovery.js');
+const { initNodeDiscoveryListener, getBestNasNode, getNasNodeById } = await import('./nodeDiscovery.js');
 
 const snapshot = async (nodes) => listener({ val: () => nodes });
 
@@ -124,5 +124,63 @@ describe('initNodeDiscoveryListener', () => {
         const entry = KNOWN_NODES.get('orin2');
         expect(entry.url).toBe('http://127.0.0.1:14500');
         expect(entry.directIp).toBeUndefined();
+    });
+});
+
+/**
+ * Choosing a destination by hand and letting the server choose have to agree about what "fits",
+ * otherwise a hand-picked node silently accepts a file the automatic path would have refused — and
+ * the refusals have to stay distinguishable, since each one asks something different of the user.
+ */
+const GB = 1024 ** 3;
+const nasNode = (id, freeGb, isReachable = true) => [id, {
+    id, isReachable, stats: { disk: { free: freeGb * GB } },
+}];
+
+describe('NAS node selection', () => {
+    beforeEach(() => {
+        KNOWN_NAS_NODES.clear();
+        KNOWN_NAS_NODES.set(...nasNode('orin2', 150));
+        KNOWN_NAS_NODES.set(...nasNode('pi', 9));
+    });
+
+    it('picks the emptiest node when none is named', () => {
+        expect(getBestNasNode(1 * GB).id).toBe('orin2');
+    });
+
+    it('returns the node that was named, not the emptiest one', () => {
+        // The whole point: a 5GB file fits on the Pi, so it must go there when asked, even though
+        // orin2 has far more room.
+        expect(getNasNodeById('pi', 5 * GB).node.id).toBe('pi');
+    });
+
+    it('holds a named node to the same headroom as the automatic pick', () => {
+        // 9GB free, 8.5GB file: fits on disk, fails the 1GB headroom. getBestNasNode would skip it,
+        // so an explicit choice must be refused too.
+        const size = 8.5 * GB;
+        expect(getBestNasNode(size).id).toBe('orin2');
+        expect(getNasNodeById('pi', size).error).toBe('full');
+    });
+
+    it('reports how much room a full node actually had', () => {
+        const refusal = getNasNodeById('pi', 8.5 * GB);
+        expect(refusal.free).toBe(9 * GB);
+        expect(refusal.headroom).toBe(GB);
+    });
+
+    it('distinguishes unreachable from full', () => {
+        KNOWN_NAS_NODES.set(...nasNode('offline', 500, false));
+        expect(getNasNodeById('offline', 1 * GB).error).toBe('unreachable');
+    });
+
+    it('distinguishes an id that is not a NAS node at all', () => {
+        expect(getNasNodeById('never-existed', 1 * GB).error).toBe('unknown');
+    });
+
+    it('treats a node with no stats as full rather than assuming room', () => {
+        // checkNasHealth nulls stats the moment a probe fails, and `|| 0` must not become "unknown,
+        // so allow it".
+        KNOWN_NAS_NODES.set('nostats', { id: 'nostats', isReachable: true, stats: null });
+        expect(getNasNodeById('nostats', 1).error).toBe('full');
     });
 });

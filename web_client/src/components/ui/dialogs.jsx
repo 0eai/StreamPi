@@ -26,7 +26,7 @@ const DialogContext = createContext(null);
  * rather than a lookup table on purpose: `TABLE[kind] ?? false` would turn prompt's deliberate null
  * back into false, since ?? treats null as absent.
  */
-const cancelValueFor = (kind) => (kind === 'prompt' ? null : false);
+const cancelValueFor = (kind) => (kind === 'prompt' || kind === 'choose' ? null : false);
 
 export const DialogProvider = ({ children }) => {
     const [dialog, setDialog] = useState(null);
@@ -73,6 +73,15 @@ export const DialogProvider = ({ children }) => {
                 kind: 'prompt',
                 ...(typeof arg === 'string' ? { label: arg } : arg),
             }),
+            /**
+             * `choose({ label, options, message, value })` — a confirm that also answers "which one".
+             * Resolves the chosen option's value, or null when cancelled, following prompt rather
+             * than confirm so a caller can tell "cancelled" from a legitimately falsy choice.
+             *
+             * Give every option a truthy value for that reason; `''` as a value would be
+             * indistinguishable from a dismissal at the call site.
+             */
+            choose: (arg) => open({ kind: 'choose', ...arg }),
         };
     }
 
@@ -81,6 +90,7 @@ export const DialogProvider = ({ children }) => {
             {children}
             {dialog?.kind === 'confirm' && <ConfirmDialog spec={dialog} onSettle={settle} />}
             {dialog?.kind === 'prompt' && <PromptDialog spec={dialog} onSettle={settle} />}
+            {dialog?.kind === 'choose' && <ChooseDialog spec={dialog} onSettle={settle} />}
         </DialogContext.Provider>
     );
 };
@@ -133,6 +143,41 @@ const PromptDialog = ({ spec, onSettle }) => {
                     <Button type="button" variant="ghost" onClick={() => onSettle(null)}>Cancel</Button>
                     <Button type="submit" variant="primary" disabled={!value.trim()}>
                         {spec.confirmLabel || 'Save'}
+                    </Button>
+                </div>
+            </form>
+        </Modal>
+    );
+};
+
+const ChooseDialog = ({ spec, onSettle }) => {
+    const options = spec.options || [];
+    // Seeded from the first option, so the default is whatever the caller listed first rather than an
+    // empty selection the user has to notice and fix before Confirm does anything.
+    const [value, setValue] = useState(spec.value ?? options[0]?.value ?? '');
+
+    return (
+        <Modal isOpen onClose={() => onSettle(null)} nested title={spec.title || 'Are you sure?'}>
+            <form onSubmit={(e) => { e.preventDefault(); onSettle(value); }}>
+                {spec.message && <p className="text-sm text-muted mb-4 whitespace-pre-line">{spec.message}</p>}
+                {/* Same structure and tokens as Input, so a select in a dialog matches a text field
+                    in one — the raw grays elsewhere in the app predate the token system. */}
+                <label className="block">
+                    {spec.label && (
+                        <span className="block text-xs uppercase tracking-wider text-muted-2 font-medium mb-2">{spec.label}</span>
+                    )}
+                    <select
+                        className="w-full bg-surface border border-border rounded-md px-3.5 py-2.5 text-text focus:outline-none focus:border-accent transition-colors"
+                        value={value}
+                        onChange={(e) => setValue(e.target.value)}
+                    >
+                        {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </select>
+                </label>
+                <div className="flex justify-end gap-2 mt-6">
+                    <Button type="button" variant="ghost" onClick={() => onSettle(null)}>{spec.cancelLabel || 'Cancel'}</Button>
+                    <Button type="submit" variant="primary" disabled={!value}>
+                        {spec.confirmLabel || 'Confirm'}
                     </Button>
                 </div>
             </form>

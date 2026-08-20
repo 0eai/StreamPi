@@ -3,8 +3,14 @@ import { apiFetch, parseJsonSafe } from './api';
 import { useNasTransferProgress } from './nas';
 import { useDialogs } from '../components/ui/dialogs';
 import { useToast } from '../components/ui/toast';
+import { formatBytes } from './format';
 
 const EMPTY_LIBRARY = { continueWatching: [], movies: [], series: [] };
+
+// Sentinel for "let the server choose", which is what offloading did before a destination could be
+// picked. Deliberately not '' — choose() resolves null on a dismissal, and a falsy option value could
+// not be told apart from one.
+const AUTO_NAS_NODE = 'auto';
 
 // A move's own fetch is what clears movingFilenames in the common case — but that promise (and
 // the plain React state it resolves into) lives only in this tab's JS context, so a refresh
@@ -28,7 +34,7 @@ const MOVE_GRACE_MS = 5000;
 export const useLibraryActions = (token, serverUrl, onUnauthorized) => {
     // This is a hook, so it reaches the dialog/toast providers directly rather than having them
     // threaded down through every component that calls one of these actions.
-    const { confirm, prompt } = useDialogs();
+    const { confirm, prompt, choose } = useDialogs();
     const toast = useToast();
 
     const [library, setLibrary] = useState(EMPTY_LIBRARY);
@@ -192,12 +198,48 @@ export const useLibraryActions = (token, serverUrl, onUnauthorized) => {
     // --- MOVE LOGIC ---
     const handleMove = async (item) => {
         const action = item.is_archived ? 'restore' : 'archive';
+        const label = item.title || item.filename;
+        let nodeId = null;
 
-        const actionText = item.is_archived
-            ? 'Restore from NAS to Main Storage'
-            : 'Offload to NAS Storage';
+        if (action === 'restore') {
+            if (!await confirm(`Restore from NAS to Main Storage for "${label}"?`)) return;
+        } else {
+            // Fetched at the moment of the choice rather than kept in state: both of the things this
+            // list reports — whether a node is reachable, and how much room it has left — move on
+            // their own, and most library sessions never offload anything at all.
+            let nodes;
+            try {
+                const res = await apiFetch(serverUrl, '/api/upload/nas-nodes', token);
+                nodes = await parseJsonSafe(res);
+                if (!res.ok) throw new Error(nodes.error || res.statusText);
+            } catch (e) {
+                toast.error(`Could not list NAS nodes: ${e.message}`);
+                return;
+            }
 
-        if (!await confirm(`${actionText} for "${item.title || item.filename}"?`)) return;
+            // The server would refuse this anyway, but saying so before the confirmation is the
+            // difference between an explanation and a failed action.
+            if (!Array.isArray(nodes) || nodes.length === 0) {
+                toast.error('No NAS node is reachable right now.');
+                return;
+            }
+
+            // AUTO keeps the previous behaviour as the default — the server picks the emptiest node —
+            // so choosing a destination is available without being a step. It must be truthy: choose()
+            // resolves null for a dismissal, and an empty value would be indistinguishable from one.
+            const choice = await choose({
+                title: 'Offload to NAS Storage',
+                message: `Move "${label}" off main storage?`,
+                label: 'Destination',
+                confirmLabel: 'Offload',
+                options: [
+                    { value: AUTO_NAS_NODE, label: 'Automatic — node with the most free space' },
+                    ...nodes.map(n => ({ value: n.id, label: `${n.name} — ${formatBytes(n.free)} free` })),
+                ],
+            });
+            if (!choice) return;
+            if (choice !== AUTO_NAS_NODE) nodeId = choice;
+        }
 
         // Explicit reset, not just the render-time seed above — a filename moved once before
         // (archived, then later restored) already has a stale timestamp in the ref, which
@@ -206,7 +248,10 @@ export const useLibraryActions = (token, serverUrl, onUnauthorized) => {
         setMovingFilenames(prev => [...prev, item.filename]);
 
         try {
-            const res = await apiFetch(serverUrl, '/api/media/nas-action', token, { method: 'POST', json: { path: item.path, action } });
+            const res = await apiFetch(serverUrl, '/api/media/nas-action', token, {
+                method: 'POST',
+                json: { path: item.path, action, ...(nodeId ? { nodeId } : {}) },
+            });
 
             if (res.ok) {
                 const result = await res.json();

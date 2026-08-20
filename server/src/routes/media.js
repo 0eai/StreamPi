@@ -13,7 +13,7 @@ import { resolveNasFile, withNasAvailability, isNasNodeAvailable } from '../nasS
 import { extractMetadata, parseFilename } from '../mediaMetadata.js';
 import { cleanupEmptyDirs, processDirectToNodeFile } from '../mediaPipeline.js';
 import { checkTranscodeQueue } from '../transcodeQueue.js';
-import { getBestNasNode } from '../nodeDiscovery.js';
+import { getBestNasNode, getNasNodeById } from '../nodeDiscovery.js';
 import { hasFreeSpace, sendServerError } from '../logger.js';
 import { upload } from '../uploadMiddleware.js';
 
@@ -515,7 +515,7 @@ router.post('/api/upload', verifyToken, (req, res, next) => { req.setTimeout(360
 });
 
 router.post('/api/media/nas-action', verifyToken, async (req, res) => {
-    const { path: filePath, action } = req.body;
+    const { path: filePath, action, nodeId } = req.body;
 
     try {
         if (!filePath) throw new Error("No file path provided");
@@ -535,11 +535,34 @@ router.post('/api/media/nas-action', verifyToken, async (req, res) => {
             if (!existsSync(filePath)) return res.status(404).json({ error: "Local file not found" });
 
             const stats = await fs.stat(filePath);
-            const targetNas = getBestNasNode(stats.size);
 
-            if (!targetNas) throw new Error("No suitable NAS node available");
+            /**
+             * `nodeId` is optional: without it this picks the emptiest node, which is what every
+             * caller did before a destination could be chosen. With it, the named node is held to the
+             * same admission test — an explicit choice selects *which* node, it does not waive the
+             * check that the file fits.
+             *
+             * The refusals are separated because the destination was the user's decision and each
+             * reason calls for something different from them: 409 for a node that is merely
+             * unreachable this minute (retry, or pick another), 507 for one that is full (it will not
+             * fix itself), 400 for an id that is not a NAS node at all (a stale picker — reload).
+             */
+            let targetNas;
+            if (nodeId) {
+                const picked = getNasNodeById(nodeId, stats.size);
+                if (picked.error === 'unknown') return res.status(400).json({ error: `"${nodeId}" is not a NAS node. Refresh and try again.` });
+                if (picked.error === 'unreachable') return res.status(409).json({ error: `That node is not reachable right now.` });
+                if (picked.error === 'full') {
+                    const needed = stats.size + picked.headroom;
+                    return res.status(507).json({ error: `Not enough room on that node: ${Math.round(picked.free / 1e6)} MB free, ${Math.round(needed / 1e6)} MB needed.` });
+                }
+                targetNas = picked.node;
+            } else {
+                targetNas = getBestNasNode(stats.size);
+                if (!targetNas) throw new Error("No suitable NAS node available");
+            }
 
-            console.log(`📦 Manual Archive via cURL: ${filePath} -> ${targetNas.id}`);
+            console.log(`📦 Manual Archive via cURL: ${filePath} -> ${targetNas.id}${nodeId ? ' (chosen)' : ' (automatic)'}`);
 
             const uploadUrl = `${targetNas.url}/archive`;
 
@@ -584,10 +607,14 @@ router.post('/api/media/nas-action', verifyToken, async (req, res) => {
 
             await fs.unlink(filePath);
 
+            // Named in the response because the destination is no longer always the same one, and on
+            // the automatic path the caller has no way to know which node it landed on.
+            const named = await db.get("SELECT name FROM nodes WHERE id = ?", targetNas.id);
+
             // newPath is required by callers that patch an item in place (the web client
             // reads result.newPath); without it they store `undefined` and the item can no
             // longer be streamed until a full library refetch.
-            return res.json({ success: true, message: "Moved to NAS", newPath });
+            return res.json({ success: true, message: `Moved to ${named?.name || targetNas.id}`, newPath, nodeId: targetNas.id });
         }
 
         else if (action === 'restore') {
