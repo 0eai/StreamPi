@@ -10,6 +10,7 @@ import { db, initDB, logActivity } from '../db.js';
 import { verifyToken } from '../middleware.js';
 import { KNOWN_NAS_NODES } from '../state.js';
 import { resolveNasFile, withNasAvailability, isNasNodeAvailable } from '../nasSource.js';
+import { ffmpegAuthHeader } from '../ffmpegAuth.js';
 import { extractMetadata, parseFilename } from '../mediaMetadata.js';
 import { cleanupEmptyDirs, processDirectToNodeFile } from '../mediaPipeline.js';
 import { checkTranscodeQueue } from '../transcodeQueue.js';
@@ -278,7 +279,7 @@ const probeMediaInfo = async (req, res) => {
         // mediaMetadata.js's extractMetadataRemote.
         execFile('ffprobe', [
             '-v', 'quiet', '-print_format', 'json', '-show_streams', '-show_format',
-            '-headers', `Authorization: Bearer ${nas.apiKey}`, fileUrl
+            '-headers', ffmpegAuthHeader(nas.apiKey), fileUrl
         ], { timeout: 15000 }, (error, stdout, stderr) => {
             if (error) {
                 console.error("NAS Probe Error:", stderr);

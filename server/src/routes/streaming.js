@@ -7,6 +7,7 @@ import { db, initDB } from '../db.js';
 import { verifyToken } from '../middleware.js';
 import { ACTIVE_STREAMS } from '../state.js';
 import { resolveNasFile } from '../nasSource.js';
+import { ffmpegAuthHeader } from '../ffmpegAuth.js';
 import { streamMediaFile, streamSubtitle, downloadMediaFile } from '../streamCore.js';
 
 const router = express.Router();
@@ -37,8 +38,10 @@ router.get('/api/posters/:filename', async (req, res) => {
             if (!nas.ok) return res.status(nas.status).send(nas.error);
 
             inputPath = nas.url;
+            // No trailing CRLF — see the note in mediaMetadata.js's extractMetadataRemote. ffmpeg
+            // turns it into a stray bare CR inside the header value and the node answers 400.
             inputOptions = [
-                '-headers', `Authorization: Bearer ${nas.apiKey}\r\n`,
+                '-headers', ffmpegAuthHeader(nas.apiKey),
                 '-ss', '30'
             ];
         } else if (!existsSync(inputPath)) {

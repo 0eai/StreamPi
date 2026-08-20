@@ -55,8 +55,9 @@ export const isNasNodeAvailable = (node, now = Date.now()) => {
  * `{ ok: true, nodeId, filename, node, url, apiKey }` on success; on failure
  * `{ ok: false, status, error }` with a status the caller can return directly. Callers format
  * the credential themselves because the consumers differ — axios wants a headers object,
- * ffmpeg's `-headers` wants `Authorization: Bearer …` (with a trailing CRLF when more headers
- * may follow), and ffprobe is handed the same as an execFile argument.
+ * ffmpeg's `-headers` wants `Authorization: Bearer …` with **no** trailing CRLF — that separator
+ * belongs *between* headers, and appending it to the last one leaves a bare CR inside the value that
+ * a strict HTTP parser answers with 400. ffprobe is handed the same as an execFile argument.
  */
 export const resolveNasFile = (p) => {
     const parsed = parseNasPath(p);

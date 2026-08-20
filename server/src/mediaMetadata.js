@@ -3,6 +3,7 @@ import { existsSync } from 'fs';
 import { execFile } from 'child_process';
 import ffmpeg from 'fluent-ffmpeg';
 import { THUMB_FOLDER } from './paths.js';
+import { ffmpegAuthHeader } from './ffmpegAuth.js';
 
 export const parseFilename = (filename) => {
     const seriesMatch = filename.match(/(.+?)[ .][sS](\d{1,2})[eE](\d{1,2})/i);
@@ -72,7 +73,7 @@ export const extractMetadataRemote = (fileUrl, apiKey, thumbName) => {
         // it (the Telegram download queue, the archiver), forever.
         execFile('ffprobe', [
             '-v', 'quiet', '-print_format', 'json', '-show_streams', '-show_format',
-            '-headers', `Authorization: Bearer ${apiKey}`, fileUrl
+            '-headers', ffmpegAuthHeader(apiKey), fileUrl
         ], { timeout: 15000 }, (err, stdout) => {
             let duration = 0, needsTranscode = true;
             try {
@@ -87,7 +88,13 @@ export const extractMetadataRemote = (fileUrl, apiKey, thumbName) => {
             if (existsSync(thumbPath)) return resolve({ duration, poster: thumbName, needsTranscode });
 
             // fluent-ffmpeg has no built-in timeout option, so this enforces one manually.
-            const cmd = ffmpeg(fileUrl).inputOptions(['-headers', `Authorization: Bearer ${apiKey}\r\n`]);
+            // No trailing CRLF. ffmpeg strips a trailing \n and appends its own \r\n, so a value
+            // ending in \r\n arrives as `Authorization: Bearer <key>\r` — a header with a stray bare
+            // CR in it, which Node's parser rejects with a 400 before serving a byte. Captured off the
+            // wire: `...Bearer TESTKEY\r\r\n\r\n`. That is why every NAS poster extraction failed
+            // instantly while the ffprobe call two lines above, which omits the CRLF, always worked —
+            // hence rows with a correct duration and no poster.
+            const cmd = ffmpeg(fileUrl).inputOptions(['-headers', ffmpegAuthHeader(apiKey)]);
             const timer = setTimeout(() => { try { cmd.kill('SIGKILL'); } catch (e) {} }, 15000);
             cmd.on('error', () => { clearTimeout(timer); resolve({ duration, poster: null, needsTranscode }); })
                 .on('end', () => { clearTimeout(timer); resolve({ duration, poster: thumbName, needsTranscode }); })

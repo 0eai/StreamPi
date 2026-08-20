@@ -8,6 +8,7 @@ import { logActivity } from './db.js';
 import { ACTIVE_STREAMS } from './state.js';
 import { contentDispositionFor } from './contentDisposition.js';
 import { resolveNasFile, parseNasPath } from './nasSource.js';
+import { ffmpegAuthHeader } from './ffmpegAuth.js';
 import { shouldLogWatch, watchLogKey } from './watchLogThrottle.js';
 import { checkTranscodeQueue } from './transcodeQueue.js';
 
@@ -250,7 +251,7 @@ export const streamMediaFile = async (req, res, filePath, { username, role } = {
 
             const ffmpegCommand = ffmpeg(nasUrl)
                 .inputOptions([
-                    '-headers', `Authorization: Bearer ${nas.apiKey}`,
+                    '-headers', ffmpegAuthHeader(nas.apiKey),
                     '-re'
                 ]);
 
@@ -329,7 +330,7 @@ export const streamSubtitle = async (req, res, filePath, index) => {
         if (!nas.ok) return res.status(nas.status).send(nas.error);
 
         inputPath = nas.url;
-        inputOptions = [`-headers`, `Authorization: Bearer ${nas.apiKey}`];
+        inputOptions = ['-headers', ffmpegAuthHeader(nas.apiKey)];
     } else if (!existsSync(filePath)) {
         return res.status(404).send("File not found");
     }
