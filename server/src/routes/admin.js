@@ -213,6 +213,40 @@ router.post('/api/admin/nodes/:id/regenerate', verifyToken, async (req, res) => 
     } catch (e) { sendServerError(res, e); }
 });
 
+/**
+ * Renames a node — its *label* only. The id is deliberately untouched.
+ *
+ * generateNodeId derives the id from the name at creation ("ankit" -> ankit_22abee), which makes it
+ * look like a slug that should follow a rename. It must not: every archived file on that node is
+ * recorded as `nas://<id>/<filename>` in the media table, the node authenticates as that id, its
+ * node_config.json carries it, and Firebase keys both `nodes/<id>` and `node_keys/<id>` on it.
+ * Changing it would orphan every archived file and lock the node out of registering. The id is
+ * identity; the name is only what the dashboard prints.
+ *
+ * Left at the two-clause admin gate rather than super_admin, unlike /owner and /regenerate: this
+ * grants nobody access to anything and cannot strand a node. It is a label.
+ */
+router.patch('/api/admin/nodes/:id', verifyToken, async (req, res) => {
+    if (req.user.role !== 'super_admin' && req.user.role !== 'admin') {
+        return res.status(403).json({ error: "Access Denied" });
+    }
+    const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+    if (!name) return res.status(400).json({ error: "Name is required" });
+    // The dashboard renders this next to the id in a fixed-width column; a 200-character name is a
+    // broken layout rather than a useful label.
+    if (name.length > 64) return res.status(400).json({ error: "Name must be 64 characters or fewer" });
+
+    try {
+        const node = await db.get("SELECT * FROM nodes WHERE id = ?", req.params.id);
+        if (!node) return res.status(404).json({ error: "Node not found" });
+        if (node.name === name) return res.json({ success: true, id: node.id, name });
+
+        await db.run("UPDATE nodes SET name = ? WHERE id = ?", [name, node.id]);
+        await logActivity(req.user.username, "NODE_RENAME", `Renamed node "${node.name}" to "${name}"`, req.ip);
+        res.json({ success: true, id: node.id, name });
+    } catch (e) { sendServerError(res, e); }
+});
+
 router.delete('/api/admin/nodes/:id', verifyToken, async (req, res) => {
     if (req.user.role !== 'super_admin' && req.user.role !== 'admin') {
         return res.status(403).json({ error: "Access Denied" });

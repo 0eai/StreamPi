@@ -181,6 +181,68 @@ describe('POST /api/admin/nodes/:id/owner', () => {
     });
 });
 
+describe('PATCH /api/admin/nodes/:id (rename)', () => {
+    const patch = (p, body, user = SUPER) => {
+        currentUser = user;
+        return fetch(`${origin}${p}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body ?? {}),
+        });
+    };
+    const nameOf = (id) => raw.prepare('SELECT name FROM nodes WHERE id = ?').get(id)?.name;
+
+    it('renames the label', async () => {
+        const res = await patch('/api/admin/nodes/orin2_abc', { name: 'pi' });
+        expect(res.status).toBe(200);
+        expect(nameOf('orin2_abc')).toBe('pi');
+    });
+
+    it('never touches the id, which every archived file is recorded against', async () => {
+        // nas://<id>/<filename> is stored in the media table, the node authenticates as that id, and
+        // Firebase keys node_keys on it. A rename that "tidied" the id would orphan every archived
+        // file and lock the node out of registering.
+        await patch('/api/admin/nodes/orin2_abc', { name: 'pi' });
+        expect(raw.prepare("SELECT id FROM nodes").get().id).toBe('orin2_abc');
+    });
+
+    it('trims surrounding whitespace', async () => {
+        await patch('/api/admin/nodes/orin2_abc', { name: '  pi  ' });
+        expect(nameOf('orin2_abc')).toBe('pi');
+    });
+
+    it('refuses an empty or whitespace-only name', async () => {
+        expect((await patch('/api/admin/nodes/orin2_abc', { name: '' })).status).toBe(400);
+        expect((await patch('/api/admin/nodes/orin2_abc', { name: '   ' })).status).toBe(400);
+        expect((await patch('/api/admin/nodes/orin2_abc', {})).status).toBe(400);
+        expect(nameOf('orin2_abc')).toBe('orin2');
+    });
+
+    it('refuses a name too long for the column it renders in', async () => {
+        expect((await patch('/api/admin/nodes/orin2_abc', { name: 'x'.repeat(65) })).status).toBe(400);
+        expect((await patch('/api/admin/nodes/orin2_abc', { name: 'x'.repeat(64) })).status).toBe(200);
+    });
+
+    it('accepts a rename to the same name without writing', async () => {
+        const res = await patch('/api/admin/nodes/orin2_abc', { name: 'orin2' });
+        expect(res.status).toBe(200);
+    });
+
+    it('404s an unknown node', async () => {
+        expect((await patch('/api/admin/nodes/nope', { name: 'pi' })).status).toBe(404);
+    });
+
+    it('is open to a plain admin, since a label grants nobody anything', async () => {
+        // Deliberately unlike /owner and /regenerate: this cannot strand a node or hand out access.
+        const res = await patch('/api/admin/nodes/orin2_abc', { name: 'pi' }, ADMIN);
+        expect(res.status).toBe(200);
+    });
+
+    it('refuses an ordinary user', async () => {
+        expect((await patch('/api/admin/nodes/orin2_abc', { name: 'pi' }, USER)).status).toBe(403);
+    });
+});
+
 describe('POST /api/admin/nodes/:id/regenerate', () => {
     it('lets a super_admin rotate the key', async () => {
         const res = await post('/api/admin/nodes/orin2_abc/regenerate');

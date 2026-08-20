@@ -23,7 +23,7 @@ const isAdmin = (role) => role === 'admin' || role === 'super_admin';
 // way to reach change-password/Kunji-link). Admins additionally get User Management, Nodes,
 // and Activity Log — previously all three lived inside DashboardTab.jsx.
 const SettingsTab = ({ token, serverUrl, username, role, onLogout }) => {
-    const { confirm } = useDialogs();
+    const { confirm, prompt } = useDialogs();
     const toast = useToast();
     const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
     const [isKunjiModalOpen, setIsKunjiModalOpen] = useState(false);
@@ -135,6 +135,19 @@ const SettingsTab = ({ token, serverUrl, username, role, onLogout }) => {
             if (!res.ok) { toast.error(`Regenerate failed: ${result.error || res.statusText}`); return; }
             setNodeCredentials(result);
         } catch (e) { toast.error("Regenerate failed: " + e.message); }
+    };
+
+    const handleRenameNode = async (node) => {
+        // Only the label changes. The id stays as it is — every archived file on the node is recorded
+        // as nas://<id>/<filename>, so a "tidier" id would orphan all of them.
+        const name = await prompt({ title: `Rename "${node.name}"`, label: 'Node name', value: node.name, confirmLabel: 'Rename' });
+        if (!name || name === node.name) return;
+        try {
+            const res = await apiFetch(serverUrl, `/api/admin/nodes/${node.id}`, token, { method: 'PATCH', json: { name } });
+            const result = await parseJsonSafe(res);
+            if (!res.ok) { toast.error(`Rename failed: ${result.error || res.statusText}`); return; }
+            toast.success(`Renamed to ${name}`);
+        } catch (e) { toast.error("Rename failed: " + e.message); }
     };
 
     const handleRemoveNode = async (node) => {
@@ -420,6 +433,7 @@ const SettingsTab = ({ token, serverUrl, username, role, onLogout }) => {
                                                         at the node with its API key: Transfer is the one path that sets it without
                                                         that proof, and Regenerate is what actually dispossesses the old key holder.
                                                         An admin who could still see either would only get a 403 from it. */}
+                                                    <button onClick={() => handleRenameNode(n)} className="text-xs text-gray-400 hover:text-gray-200 font-medium mr-3">Rename</button>
                                                     {role === 'super_admin' && (
                                                         <>
                                                             <button onClick={() => setTransferNode(n)} className="text-xs text-green-500 hover:text-green-400 font-medium mr-3">Transfer</button>
