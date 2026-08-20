@@ -2,7 +2,8 @@ import express from 'express';
 import fs from 'fs';
 import fsp from 'fs/promises';
 import multer from 'multer';
-import { RUNTIME, ACTIVE_UPLOADS, ACTIVE_DOWNLOADS, RESERVED_BYTES_BY_LOCATION } from '../state.js';
+import ffmpeg from 'fluent-ffmpeg';
+import { RUNTIME, ACTIVE_UPLOADS, ACTIVE_DOWNLOADS, RESERVED_BYTES_BY_LOCATION, HW_CONFIG } from '../state.js';
 import { isSafeFilename, findFileLocation, pickPlacementLocation } from '../storage.js';
 import { createConcurrencyGate } from '../concurrencyGate.js';
 
@@ -19,6 +20,11 @@ const router = express.Router();
 // reservation count per instance.
 const checkTransferConcurrency = createConcurrencyGate(() => RUNTIME.maxConcurrentNasJobs);
 const checkReadConcurrency = createConcurrencyGate(() => RUNTIME.maxConcurrentFileReads);
+// A third gate, because a live transcode is neither: it is sustained CPU (or a fixed number of
+// hardware encoder sessions) for as long as someone is watching, not a transfer that finishes. Sharing
+// the read gate's default of 12 would let twelve simultaneous encodes onto a machine that can manage
+// one or two. Configurable, defaulting to 2.
+const checkLiveTranscodeConcurrency = createConcurrencyGate(() => RUNTIME.maxConcurrentLiveTranscodes);
 
 const trackedStorage = multer.diskStorage({
     destination: (req, file, cb) => cb(null, req.nasTargetLocation.path),
@@ -128,6 +134,89 @@ router.delete('/file/:filename', async (req, res) => {
     const location = await findFileLocation(req.params.filename);
     if (location) await fsp.unlink(location.filePath);
     res.json({ success: true });
+});
+
+/**
+ * Live transcode for playback, streamed straight out of this node's own storage.
+ *
+ * Previously the main server did this itself: it opened GET /file over the network and ran ffmpeg
+ * against that URL. On a Raspberry Pi pulling from a node across a WAN, that meant the weakest CPU in
+ * the system doing the encode while this machine's hardware encoder sat idle — and the *source*
+ * bitrate crossing the link rather than the encoded output. A 2.5 GB film became gigabytes of transfer
+ * to produce a stream of a few Mbps.
+ *
+ * The decision of what to do is deliberately NOT made here. The server knows the client's codec
+ * support and has the file's probed metadata, so it sends the verdict — copy or encode, per stream —
+ * and this executes it. That keeps one implementation of the policy and lets this node contribute the
+ * thing only it has: its own encoder, chosen at boot into HW_CONFIG.
+ *
+ * Fragmented mp4 because the output is consumed as a progressive stream with no seekable moov; the
+ * caller proxies these bytes to a <video> element. Seeking is a fresh request with a new `start`, which
+ * is how the server's own local transcode path already behaves.
+ */
+router.get('/transcode', checkLiveTranscodeConcurrency, async (req, res) => {
+    const { filename, track, start, vcodec, acodec } = req.query;
+    if (!isSafeFilename(filename)) return res.status(400).json({ error: "Invalid filename" });
+
+    const location = await findFileLocation(filename);
+    if (!location) return res.status(404).json({ error: "File not found on this node" });
+
+    const requestedTrack = parseInt(track) || 0;
+    // Only ever 'copy' or 'encode' from the server — never a named encoder. Which encoder to use is
+    // this node's business, and is the entire reason the work is here rather than there.
+    const wantsVideoEncode = vcodec !== 'copy';
+    const wantsAudioEncode = acodec !== 'copy';
+
+    const command = ffmpeg(location.filePath);
+    // -re paces the read at playback speed. Without it a hardware encoder running at 13x realtime
+    // would chew through an entire film for a viewer who watches thirty seconds, occupying an encoder
+    // session and a gate slot the whole time. Matches what the server's own local path always did.
+    command.inputOptions(['-re']);
+    if (start) command.seekInput(start);
+
+    const outputOptions = ['-map 0:v:0', `-map 0:a:${requestedTrack}?`, '-movflags frag_keyframe+empty_moov'];
+
+    if (wantsVideoEncode) {
+        // The encoder's input options go before -i, same rule as the batch path: -vaapi_device is a
+        // global option and ffmpeg fails during argument parsing if it is misplaced.
+        if (HW_CONFIG.inputOptions.length) command.inputOptions(HW_CONFIG.inputOptions);
+        command.videoCodec(HW_CONFIG.encoder);
+        // HW_CONFIG.options mixes encoder settings (VAAPI's mandatory -vf format=nv12,hwupload, the
+        // quality target) with `-movflags +faststart`, which is a *muxer* option and wrong here twice
+        // over: it contradicts the frag_keyframe+empty_moov this output needs, and it requires a
+        // seekable output, which a pipe is not. Dropped rather than reordered, since relying on which
+        // -movflags ffmpeg honours last would be silently fragile.
+        command.outputOptions(HW_CONFIG.options.filter((o) => !o.startsWith('-movflags')));
+    } else {
+        command.videoCodec('copy');
+    }
+    command.audioCodec(wantsAudioEncode ? 'aac' : 'copy');
+    if (wantsAudioEncode) command.audioBitrate('160k');
+
+    res.writeHead(200, { 'Content-Type': 'video/mp4' });
+
+    let finished = false;
+    const stop = () => {
+        if (finished) return;
+        finished = true;
+        try { command.kill('SIGKILL'); } catch (e) {}
+    };
+    // Without this an abandoned player leaves ffmpeg encoding to a socket nobody is reading, holding a
+    // gate slot and a hardware encoder session until the process restarts.
+    res.on('close', stop);
+    res.on('finish', stop);
+
+    command
+        .outputOptions(outputOptions)
+        .format('mp4')
+        .on('error', (err) => {
+            // 'Output stream closed' is the normal shape of a viewer navigating away.
+            if (!finished && !/Output stream closed|SIGKILL/.test(err.message)) {
+                console.error(`❌ Live transcode failed for ${filename}: ${err.message}`);
+            }
+            stop();
+        })
+        .pipe(res, { end: true });
 });
 
 export default router;

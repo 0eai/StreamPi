@@ -254,6 +254,50 @@ export const streamMediaFile = async (req, res, filePath, { username, role } = {
         }
 
         else {
+            // fileMetadata IS populated for NAS files now (remoteProbe, cached), so this makes the
+            // same per-stream copy-vs-encode decision as a local file: video is copied when it is
+            // already h264 and only the audio is re-encoded, instead of both unconditionally.
+            const { videoCodec, audioCodec } = pickTranscodeCodecs(fileMetadata, requestedTrack, supportsH264, supportsHEVC, supportsAAC);
+
+            /**
+             * Ask the node to do the encoding, and proxy what it produces.
+             *
+             * Doing it here meant the Pi pulled the *source* across the WAN and encoded it on four ARM
+             * cores, while the machine holding the file had an idle hardware encoder. Asking the node
+             * inverts both halves: the encode lands on whatever VAAPI or VideoToolbox that node has,
+             * and the link carries the compressed output rather than the original — for a 2.5 GB film,
+             * a few Mbps instead of gigabytes.
+             *
+             * Only the verdict is sent, never an encoder name. The node picks its own, which is the
+             * whole point; this side keeps the policy because only it knows what the client supports.
+             *
+             * A node that 404s (older build, no /transcode yet) or 503s (its live-transcode gate is
+             * full) falls through to the local path below. Nodes update independently of the server, so
+             * that fallback is not a nicety.
+             */
+            try {
+                const nodeStream = await axios({
+                    method: 'get',
+                    url: `${nas.node.url}/transcode`,
+                    params: { filename: nas.filename, track: requestedTrack, start: startTime || '', vcodec: videoCodec === 'copy' ? 'copy' : 'encode', acodec: audioCodec === 'copy' ? 'copy' : 'aac' },
+                    headers: { Authorization: `Bearer ${nas.apiKey}` },
+                    responseType: 'stream',
+                    timeout: 15000,
+                });
+
+                res.writeHead(200, { 'Content-Type': 'video/mp4' });
+                // Recorded so /api/stream/end can tear this down: without it, killing a stream would
+                // close our response to the client while leaving the node encoding into a socket
+                // nobody reads.
+                streamInfo.proxyRequest = nodeStream.data;
+                nodeStream.data.on('error', () => cleanup());
+                nodeStream.data.pipe(res);
+                return;
+            } catch (e) {
+                const status = e.response?.status;
+                console.log(`↩️  Node ${nas.nodeId} could not live-transcode (${status || e.message}); encoding locally instead.`);
+            }
+
             res.writeHead(200, { 'Content-Type': 'video/mp4' });
 
             const ffmpegCommand = ffmpeg(nasUrl)
@@ -264,10 +308,6 @@ export const streamMediaFile = async (req, res, filePath, { username, role } = {
 
             if (startTime) ffmpegCommand.seekInput(startTime);
 
-            // fileMetadata IS populated for NAS files now (remoteProbe, cached), so this makes the
-            // same per-stream copy-vs-encode decision as a local file: video is copied when it is
-            // already h264 and only the audio is re-encoded, instead of both unconditionally.
-            const { videoCodec, audioCodec } = pickTranscodeCodecs(fileMetadata, requestedTrack, supportsH264, supportsHEVC, supportsAAC);
             const outputOpts = ['-map 0:v:0', `-map 0:a:${requestedTrack}?`, '-movflags frag_keyframe+empty_moov'];
             if (videoCodec !== 'copy') outputOpts.push('-preset ultrafast', '-crf 28', '-tune zerolatency');
 

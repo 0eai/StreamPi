@@ -42,7 +42,14 @@ export const RUNTIME = {
      *
      * Still bounded rather than unlimited, so one client can't exhaust the node's file handles.
      */
-    maxConcurrentFileReads: CFG.maxConcurrentFileReads || 12
+    maxConcurrentFileReads: CFG.maxConcurrentFileReads || 12,
+    /**
+     * Live playback transcodes, which are a third shape of work again: sustained CPU — or a fixed
+     * number of hardware encoder sessions — for as long as someone is watching, rather than something
+     * that finishes. Sharing the read bound of 12 would admit twelve simultaneous encodes to a machine
+     * that can manage one or two, so this is deliberately small.
+     */
+    maxConcurrentLiveTranscodes: CFG.maxConcurrentLiveTranscodes || 2
 };
 
 if (IS_NAS) for (const loc of RUNTIME.nasStorageLocations) fs.mkdirSync(loc.path, { recursive: true });
