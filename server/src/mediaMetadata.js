@@ -98,7 +98,25 @@ export const extractMetadataRemote = (fileUrl, apiKey, thumbName) => {
             const timer = setTimeout(() => { try { cmd.kill('SIGKILL'); } catch (e) {} }, 15000);
             cmd.on('error', () => { clearTimeout(timer); resolve({ duration, poster: null, needsTranscode }); })
                 .on('end', () => { clearTimeout(timer); resolve({ duration, poster: thumbName, needsTranscode }); })
-                .screenshots({ count: 1, timestamps: ['10%'], folder: THUMB_FOLDER, filename: thumbName, size: '320x?' });
+                /**
+                 * An absolute offset in seconds, never a percentage. fluent-ffmpeg resolves a '10%'
+                 * timemark by calling its own .ffprobe(), which spawns
+                 *   ffprobe -show_streams -show_format <url>
+                 * and does NOT pass this command's inputOptions along — so that probe goes out with no
+                 * Authorization header, the node answers 403, and the screenshot is abandoned before
+                 * ffmpeg ever runs. A second, independent reason every NAS poster failed: fixing the
+                 * header alone did not cure it.
+                 *
+                 * The duration is already known from the authenticated ffprobe above, so the percentage
+                 * is computed here rather than delegated. The 5s fallback covers that probe having
+                 * failed too — a long shot, but better than seeking to 0, which on many films is a
+                 * black frame or a fade-in.
+                 */
+                .screenshots({
+                    count: 1,
+                    timestamps: [duration > 0 ? Math.max(1, Math.floor(duration * 0.1)) : 5],
+                    folder: THUMB_FOLDER, filename: thumbName, size: '320x?'
+                });
         });
     });
 };
