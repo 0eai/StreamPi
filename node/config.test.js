@@ -8,12 +8,17 @@ import { fileURLToPath } from 'url';
  */
 
 let files = {};
+let executables = new Set();
 vi.mock('fs', () => {
     const api = {
+        constants: { X_OK: 1 },
         existsSync: (p) => p in files,
         readFileSync: (p) => {
             if (!(p in files)) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
             return files[p];
+        },
+        accessSync: (p) => {
+            if (!executables.has(p)) throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
         },
         mkdirSync: () => {},
     };
@@ -27,6 +32,9 @@ let errors;
 beforeEach(() => {
     exitCode = undefined;
     errors = [];
+    executables = new Set();
+    delete process.env.FFMPEG_PATH;
+    delete process.env.FFPROBE_PATH;
     vi.spyOn(process, 'exit').mockImplementation((c) => { exitCode = c; throw new Error('__exit__'); });
     vi.spyOn(console, 'error').mockImplementation((...a) => errors.push(a.join(' ')));
 });
@@ -82,5 +90,58 @@ describe('publicUrl', () => {
         seed({ publicUrl: 'ssh://127.0.0.1:14500' });
         await expect(load()).rejects.toThrow('__exit__');
         expect(exitCode).toBe(1);
+    });
+});
+
+describe('ffmpegPath / ffprobePath', () => {
+    const FFMPEG = '/opt/homebrew/bin/ffmpeg';
+
+    it('is null when unset, leaving fluent-ffmpeg to search PATH as before', async () => {
+        seed({});
+        const { FFMPEG_PATH, FFPROBE_PATH } = await load();
+        expect(FFMPEG_PATH).toBeNull();
+        expect(FFPROBE_PATH).toBeNull();
+    });
+
+    it('takes an executable path from the config file', async () => {
+        executables.add(FFMPEG);
+        seed({ ffmpegPath: FFMPEG });
+        expect((await load()).FFMPEG_PATH).toBe(FFMPEG);
+    });
+
+    it('falls back to the environment, which is what fluent-ffmpeg reads natively', async () => {
+        executables.add(FFMPEG);
+        process.env.FFMPEG_PATH = FFMPEG;
+        seed({});
+        expect((await load()).FFMPEG_PATH).toBe(FFMPEG);
+    });
+
+    it('prefers the config file over the environment', async () => {
+        // The config file is the thing a node operator edits; an inherited environment variable is
+        // the thing that surprises them.
+        executables.add(FFMPEG);
+        executables.add('/usr/bin/ffmpeg');
+        process.env.FFMPEG_PATH = '/usr/bin/ffmpeg';
+        seed({ ffmpegPath: FFMPEG });
+        expect((await load()).FFMPEG_PATH).toBe(FFMPEG);
+    });
+
+    it('complains about a path that is not executable, but keeps the node running', async () => {
+        // Unlike publicUrl, this has a meaningful partial outcome: a node holding the nas role still
+        // serves and stores files without ffmpeg, and killing it over a mistyped transcoder path
+        // would make every file already archived on it unplayable.
+        seed({ ffmpegPath: '/opt/homebrew/bin/ffmpeg-typo' });
+        const { FFMPEG_PATH } = await load();
+        expect(FFMPEG_PATH).toBeNull();
+        expect(exitCode).toBeUndefined();
+        expect(errors.join(' ')).toMatch(/node_config.json ffmpegPath is .*not an executable file/);
+    });
+
+    it('names the environment as the source when that is where the bad value came from', async () => {
+        process.env.FFPROBE_PATH = '/nope/ffprobe';
+        seed({});
+        const { FFPROBE_PATH } = await load();
+        expect(FFPROBE_PATH).toBeNull();
+        expect(errors.join(' ')).toMatch(/FFPROBE_PATH in the environment/);
     });
 });

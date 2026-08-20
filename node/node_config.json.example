@@ -8,6 +8,9 @@
   "port": 4500,
   "_comment_publicUrl": "Only when the server cannot reach this node directly (NAT, or a network that filters inbound). The URL is resolved on the server, so a reverse SSH tunnel's value is http://127.0.0.1:<forwarded port>. Setting it stops this node advertising a direct address.",
   "publicUrl": "",
+  "_comment_ffmpegPath": "Absolute paths to ffmpeg/ffprobe, for a machine where they are not on the PATH this process was launched with (Homebrew's /opt/homebrew/bin is on a login shell's PATH but not a service's). Leave empty to search PATH. Symptom: every encoder probe fails and hardware reads 'ffmpeg unavailable' while ffmpeg works fine by hand.",
+  "ffmpegPath": "",
+  "ffprobePath": "",
   "nasStorageLocations": [
     {
       "id": "default",

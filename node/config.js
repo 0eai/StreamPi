@@ -41,6 +41,47 @@ export const CONFIG_FILE_PATH = CONFIG_PATH;
 export const WORK_DIR = CFG.workDir || path.join(__dirname, 'transcoder_work');
 
 /**
+ * Absolute paths to the ffmpeg/ffprobe binaries, for machines where they are not on the PATH this
+ * process was launched with.
+ *
+ * fluent-ffmpeg already reads the FFMPEG_PATH/FFPROBE_PATH environment variables, so this exists for
+ * a different reason: a node is deployed by unzipping a package onto someone else's machine, and
+ * "set an environment variable in whatever launches it" is a much worse contract than "put it in the
+ * config file you already had to edit". The launcher is the part that varies — launchd, systemd, pm2,
+ * a terminal — and it is exactly where a PATH goes missing.
+ *
+ * That is not hypothetical. The Mac node could encode with h264_videotoolbox from a shell and failed
+ * every probe as a service, because Homebrew installs to /opt/homebrew/bin, which is on a login
+ * shell's PATH and not on the PATH of a launched process.
+ *
+ * Verified executable at boot rather than trusted, whichever source it came from, because an unusable
+ * path fails misleadingly: every encoder probe fails, and the node used to report that as "CPU
+ * Software Encoding" and carry on accepting jobs.
+ *
+ * A bad path complains and is then *ignored*, rather than stopping the node the way a bad publicUrl
+ * does. The difference is that this one has a meaningful partial outcome: most nodes hold the `nas`
+ * role too, serving and storing files without touching ffmpeg at all, and taking that down over a
+ * mistyped transcoder path would turn a degraded node into an offline one — including making every
+ * already-archived file on it unplayable. The remaining failure is not silent either: the boot log
+ * says so here, and detectHardware then reports "ffmpeg unavailable" in the hardware column.
+ */
+const resolveBinary = (cfgKey, envKey) => {
+    const fromCfg = CFG[cfgKey];
+    const value = fromCfg || process.env[envKey];
+    if (!value) return null;
+    try {
+        fs.accessSync(value, fs.constants.X_OK);
+        return value;
+    } catch (e) {
+        const source = fromCfg ? `node_config.json ${cfgKey}` : `${envKey} in the environment`;
+        console.error(`❌ ${source} is ${JSON.stringify(value)}, which is not an executable file — ignoring it and searching PATH instead.`);
+        return null;
+    }
+};
+export const FFMPEG_PATH = resolveBinary('ffmpegPath', 'FFMPEG_PATH');
+export const FFPROBE_PATH = resolveBinary('ffprobePath', 'FFPROBE_PATH');
+
+/**
  * The URL the main server should use to reach this node, when that is not simply this machine's own
  * address and port.
  *

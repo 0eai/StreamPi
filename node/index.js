@@ -2,7 +2,8 @@ import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import crypto from 'crypto';
-import { ID, API_KEY, ROLES, PORT, DATABASE_URL, IS_TRANSCODER, IS_NAS, __dirname, sweepWorkDir } from './config.js';
+import ffmpeg from 'fluent-ffmpeg';
+import { ID, API_KEY, ROLES, PORT, DATABASE_URL, IS_TRANSCODER, IS_NAS, __dirname, sweepWorkDir, FFMPEG_PATH, FFPROBE_PATH } from './config.js';
 import { detectHardware } from './hardware.js';
 import { startStatsSampling } from './stats.js';
 import { resumePendingMigrationsOnBoot } from './migration.js';
@@ -10,6 +11,13 @@ import { registerWithFirebase } from './discovery.js';
 import coreRoutes from './routes/core.js';
 import transcoderRoutes from './routes/transcoder.js';
 import nasRoutes from './routes/nas.js';
+
+// Before anything touches ffmpeg — the boot-time encoder probe in detectHardware() is the first
+// thing that would, and the transcoder routes the next. Setting it here rather than inside each
+// consumer means one place decides, and it happens whether or not this node has the transcoder role
+// (ffprobe is used for media info on the NAS side too).
+if (FFMPEG_PATH) ffmpeg.setFfmpegPath(FFMPEG_PATH);
+if (FFPROBE_PATH) ffmpeg.setFfprobePath(FFPROBE_PATH);
 
 // ==========================================
 // HTTP SERVER
