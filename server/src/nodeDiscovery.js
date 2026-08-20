@@ -151,6 +151,15 @@ export const initNodeDiscoveryListener = () => {
             const roles = Array.isArray(node.roles) ? node.roles : String(node.roles || '').split(',').filter(Boolean);
             const isTranscoder = roles.includes('transcoder');
             const isNas = roles.includes('nas');
+
+            // A node that *drops* a role has to leave that role's map here. The sweep at the bottom
+            // only removes nodes missing from the snapshot entirely, so one that merely narrowed its
+            // roles stayed listed as a transcoder forever — and kept being handed jobs, because it
+            // still answers /stats (a core route) and so still looks reachable and idle, while the
+            // /job and /status routes it needs are mounted only `if (IS_TRANSCODER)` on its side.
+            // The result was a job assigned to a node that answers 404, until the server restarted.
+            if (!isTranscoder) KNOWN_NODES.delete(node.id);
+            if (!isNas) KNOWN_NAS_NODES.delete(node.id);
             if (!isTranscoder && !isNas) continue;
 
             let apiKey = KNOWN_NODES.get(node.id)?.apiKey || KNOWN_NAS_NODES.get(node.id)?.apiKey;

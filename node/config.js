@@ -40,6 +40,33 @@ export const CONFIG_FILE_PATH = CONFIG_PATH;
  */
 export const WORK_DIR = CFG.workDir || path.join(__dirname, 'transcoder_work');
 
+/**
+ * The URL the main server should use to reach this node, when that is not simply this machine's own
+ * address and port.
+ *
+ * Needed wherever the node can dial out but nothing can dial in — a NAT with no port forward, or a
+ * network that filters inbound, which is the case on the campus link this was written for: the node
+ * answers perfectly on its own public IP from the machine itself, and every packet from outside is
+ * dropped in transit. The fix is a tunnel the node's side establishes, and this is how the node tells
+ * the server where the far end of it is.
+ *
+ * Validated here rather than trusted, because the failure is otherwise invisible in both directions:
+ * the server drops a non-http(s) url on the floor with one warning (nodeDiscovery's isValidNodeUrl)
+ * and then has nothing left to try, while the node goes on reporting a successful registration. A
+ * typo would look exactly like a broken tunnel.
+ */
+export const ADVERTISED_URL = (() => {
+    if (!CFG.publicUrl) return null;
+    try {
+        const parsed = new URL(CFG.publicUrl);
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('not http(s)');
+        return CFG.publicUrl.replace(/\/+$/, '');
+    } catch (e) {
+        console.error(`❌ node_config.json publicUrl is not a valid http(s) URL: ${JSON.stringify(CFG.publicUrl)}`);
+        process.exit(1);
+    }
+})();
+
 // Any failure past a successful transcode — a one-off network blip on the final delivery
 // upload, or the caller simply never retrying — previously left a fully-transcoded
 // output_<id>.mp4 (or a half-downloaded input_<id>.temp) in WORK_DIR forever, with no

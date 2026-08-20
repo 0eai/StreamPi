@@ -208,7 +208,7 @@ Admins bypass the check entirely, so they never see that screen. An admin can al
 owner from web Settings → Nodes — note that clearing alone doesn't revoke access, since a past owner
 keeps a copy of the key, which is why that dialog offers to regenerate it too.
 
-Two optional fields are worth knowing about:
+Three optional fields are worth knowing about:
 
 - **`encoder`** — `"auto"` (the default), `"libx264"`, or a specific hardware encoder such as
   `"h264_vaapi"`. Detection is a one-shot probe at boot, and on some machines its result depends on
@@ -219,6 +219,23 @@ Two optional fields are worth knowing about:
 - **`workDir`** — where download → transcode → upload jobs stage their files. Defaults to
   `node/transcoder_work` inside the checkout, which is often on the smallest filesystem a machine has;
   a job holds the input and the output at the same time, so budget roughly twice the largest source.
+- **`publicUrl`** — the address the *server* should use to reach this node, when that isn't simply the
+  node's own IP and port. Needed wherever a node can dial out but nothing can dial in: a NAT with no
+  port forward, or a network that filters inbound. Set it and the node stops advertising a direct
+  address altogether, so the server goes straight to this URL instead of waiting out a 2-second
+  timeout on one that cannot work.
+
+  For a reverse SSH tunnel the node's side establishes — `ssh -N -R 127.0.0.1:14500:127.0.0.1:4500
+  server-host` — that value is `http://127.0.0.1:14500`, since the URL is resolved *on the server*.
+  Every server→node path keys off it, health checks and archive transfers and playback of archived
+  media alike, so one tunnel covers all of them. Restrict the key on the server side to
+  `restrict,port-forwarding,permitlisten="127.0.0.1:14500"` — it then cannot open a shell or forward
+  anything else — and run the tunnel under a supervisor with `ExitOnForwardFailure=yes` and
+  `ServerAliveInterval`, so a half-dead SSH session that tunnels nothing gets replaced instead of
+  looking like a node that is down.
+
+  Note the node→server direction still goes direct, so the node needs to reach the server's own
+  address either way.
 
 On hardware acceleration: VAAPI on an Intel iGPU measured *slower* than `libx264 -preset ultrafast` on
 a 20-core CPU here, but produced output less than half the size. For a node that uploads every result
