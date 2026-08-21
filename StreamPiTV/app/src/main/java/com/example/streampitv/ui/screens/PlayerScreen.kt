@@ -8,6 +8,7 @@ import android.widget.FrameLayout
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -24,6 +25,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.onKeyEvent
@@ -49,6 +51,10 @@ import com.example.streampitv.data.ProgressRequest
 import com.example.streampitv.data.VideoItem
 import com.example.streampitv.ui.components.FocusableItem
 import com.example.streampitv.util.Codecs
+import com.example.streampitv.util.PlayerFocus
+import com.example.streampitv.util.focusHint
+import com.example.streampitv.util.nextFocus
+import com.example.streampitv.util.seekStepSeconds
 import com.example.streampitv.util.formatDuration
 import com.example.streampitv.util.catching
 import com.example.streampitv.util.nasOfflineNotice
@@ -113,10 +119,11 @@ fun PlayerScreen(
     var nextUp by remember { mutableStateOf<VideoItem?>(null) }
     var countdown by remember { mutableIntStateOf(0) }
     var ended by remember { mutableStateOf(false) }
-    // Two input modes. With the bar unfocused the D-pad scrubs, which is what you want most
-    // of the time; DOWN hands focus to the button row, where LEFT/RIGHT move between buttons
-    // instead. Without this split, adding focusable buttons would have stolen the seek keys.
-    var barFocused by remember { mutableStateOf(false) }
+    // Three input modes, walked by UP/DOWN in the order they appear on screen: video, progress
+    // bar, buttons. The split exists because LEFT/RIGHT mean different things in each — seek on the
+    // video, scrub on the bar, move between buttons in the row — so focusable buttons would
+    // otherwise have stolen the seek keys. See util/PlayerFocus.kt for the mapping itself.
+    var focus by remember { mutableStateOf(PlayerFocus.VIDEO) }
 
     // Media URLs carry a short-lived token from /api/auth/stream-token rather than the
     // session token, so a copied stream link is not a standing credential. Null means the
@@ -129,6 +136,7 @@ fun PlayerScreen(
 
     val focusRequester = remember { FocusRequester() }
     val restartFocus = remember { FocusRequester() }
+    val seekBarFocus = remember { FocusRequester() }
     val exoPlayer = remember { ExoPlayer.Builder(context).build() }
 
     // rememberUpdatedState, NOT remember(keys): the progress-sync loop below reads this from
@@ -473,20 +481,27 @@ fun PlayerScreen(
         }
     }
 
-    // Move the real focus with the mode, so the D-pad reaches whichever one is active.
-    LaunchedEffect(barFocused) {
-        if (barFocused) {
-            isControlsVisible = true
-            runCatching { restartFocus.requestFocus() }
-        } else {
-            runCatching { focusRequester.requestFocus() }
+    // Move the real focus with the mode, so the D-pad reaches whichever one is active. The
+    // overlay is forced visible for the two modes that live inside it — focusing something the user
+    // cannot see would be worse than not moving at all.
+    LaunchedEffect(focus) {
+        when (focus) {
+            PlayerFocus.VIDEO -> runCatching { focusRequester.requestFocus() }
+            PlayerFocus.SEEK -> {
+                isControlsVisible = true
+                runCatching { seekBarFocus.requestFocus() }
+            }
+            PlayerFocus.BUTTONS -> {
+                isControlsVisible = true
+                runCatching { restartFocus.requestFocus() }
+            }
         }
     }
 
     BackHandler {
-        // BACK steps out of the control bar first, so it is not a trap.
-        if (barFocused) {
-            barFocused = false
+        // BACK steps out of the overlay first, from either mode, so neither is a trap.
+        if (focus != PlayerFocus.VIDEO) {
+            focus = PlayerFocus.VIDEO
         } else {
             nextUp = null
             countdown = 0
@@ -523,9 +538,11 @@ fun PlayerScreen(
                     if (event.nativeKeyEvent.action != KeyEvent.ACTION_DOWN) return@onKeyEvent false
                     isControlsVisible = true
                     when (event.nativeKeyEvent.keyCode) {
-                        KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_MEDIA_REWIND -> { seekBy(-10); true }
-                        KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> { seekBy(10); true }
-                        KeyEvent.KEYCODE_DPAD_DOWN -> { barFocused = true; true }
+                        KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_MEDIA_REWIND -> { seekBy(-seekStepSeconds(PlayerFocus.VIDEO)); true }
+                        KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> { seekBy(seekStepSeconds(PlayerFocus.VIDEO)); true }
+                        KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN ->
+                            nextFocus(PlayerFocus.VIDEO, event.nativeKeyEvent.keyCode)
+                                ?.let { focus = it; true } ?: false
                         KeyEvent.KEYCODE_MEDIA_PREVIOUS -> { restart(); true }
                         KeyEvent.KEYCODE_MEDIA_NEXT -> { goToNextEpisode(); true }
                         KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
@@ -597,8 +614,7 @@ fun PlayerScreen(
                     // (seek vs. choose), so they are the one line worth reading before you act,
                     // and at the bottom they sat below the controls they describe.
                     Text(
-                        if (barFocused) "◀ ▶ choose  ·  OK select  ·  BACK to video"
-                        else "◀ ▶ seek 10s  ·  ▼ controls  ·  OK play/pause",
+                        focusHint(focus),
                         color = Tokens.muted2,
                         fontSize = 12.sp
                     )
@@ -636,8 +652,48 @@ fun PlayerScreen(
 
                     val shown = seekTarget?.toLong() ?: position
                     val pct = if (totalSec > 0) (shown.toFloat() / totalSec.toFloat()).coerceIn(0f, 1f) else 0f
-                    Box(modifier = Modifier.fillMaxWidth().height(6.dp).background(Color.Gray.copy(alpha = 0.5f), RoundedCornerShape(3.dp))) {
-                        Box(modifier = Modifier.fillMaxWidth(pct).fillMaxHeight().background(Tokens.accent, RoundedCornerShape(3.dp)))
+                    // Focusable, so UP can reach it. Taller and outlined while focused, because on a
+                    // TV across a room a 6dp bar changing shade is not a visible state change — and
+                    // the user needs to know which of three modes their LEFT/RIGHT presses are in.
+                    val seekFocused = focus == PlayerFocus.SEEK
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(if (seekFocused) 12.dp else 6.dp)
+                            .background(Color.Gray.copy(alpha = 0.5f), RoundedCornerShape(6.dp))
+                            .then(
+                                if (seekFocused) Modifier.border(2.dp, Color.White, RoundedCornerShape(6.dp))
+                                else Modifier
+                            )
+                            .focusRequester(seekBarFocus)
+                            // The mode follows actual focus rather than only being commanded into it.
+                            // In BUTTONS mode both this bar and the buttons are focusable, so Compose
+                            // traversal can move focus here on its own — and then the mode, the hint
+                            // and which LEFT/RIGHT step applies would all disagree with where the
+                            // highlight is.
+                            .onFocusChanged { if (it.isFocused) focus = PlayerFocus.SEEK }
+                            .focusable()
+                            .onKeyEvent { event ->
+                                if (event.nativeKeyEvent.action != KeyEvent.ACTION_DOWN) return@onKeyEvent false
+                                isControlsVisible = true
+                                when (event.nativeKeyEvent.keyCode) {
+                                    KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_MEDIA_REWIND ->
+                                        { seekBy(-seekStepSeconds(PlayerFocus.SEEK)); true }
+                                    KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_MEDIA_FAST_FORWARD ->
+                                        { seekBy(seekStepSeconds(PlayerFocus.SEEK)); true }
+                                    KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN ->
+                                        nextFocus(PlayerFocus.SEEK, event.nativeKeyEvent.keyCode)
+                                            ?.let { focus = it; true } ?: false
+                                    // OK means "done scrubbing" rather than "commit": the seek is
+                                    // already applied (directly, or via the debounced re-request on
+                                    // the transcoded path), so this only hands the keys back.
+                                    KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER ->
+                                        { focus = PlayerFocus.VIDEO; true }
+                                    else -> false
+                                }
+                            }
+                    ) {
+                        Box(modifier = Modifier.fillMaxWidth(pct).fillMaxHeight().background(Tokens.accent, RoundedCornerShape(6.dp)))
                     }
 
                     Spacer(modifier = Modifier.height(10.dp))
@@ -654,7 +710,19 @@ fun PlayerScreen(
                     // same thing) and the status text is width-capped so it ellipsises rather than
                     // shoving the timecode off the screen.
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            // UP out of the button row, which Compose focus traversal cannot do on
+                            // its own: the bar above is a sibling in the same Column and the buttons
+                            // are the only focusable children here, so there is nothing for it to
+                            // move to. Handled on the row rather than per button so it works from
+                            // whichever one happens to be focused.
+                            .onKeyEvent { event ->
+                                if (event.nativeKeyEvent.action != KeyEvent.ACTION_DOWN) return@onKeyEvent false
+                                if (event.nativeKeyEvent.keyCode != KeyEvent.KEYCODE_DPAD_UP) return@onKeyEvent false
+                                nextFocus(PlayerFocus.BUTTONS, event.nativeKeyEvent.keyCode)
+                                    ?.let { focus = it; true } ?: false
+                            },
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Row(
@@ -664,20 +732,20 @@ fun PlayerScreen(
                         PlayerButton(
                             label = "Restart",
                             icon = Icons.Default.Replay,
-                            focusable = barFocused,
+                            focusable = focus == PlayerFocus.BUTTONS,
                             modifier = Modifier.focusRequester(restartFocus),
                             onClick = { restart() }
                         )
                         PlayerButton(
                             label = if (isPlaying) "Pause" else "Play",
                             icon = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                            focusable = barFocused,
+                            focusable = focus == PlayerFocus.BUTTONS,
                             onClick = { togglePlay() }
                         )
                         PlayerButton(
                             label = "Next",
                             icon = Icons.Default.SkipNext,
-                            focusable = barFocused,
+                            focusable = focus == PlayerFocus.BUTTONS,
                             onClick = { goToNextEpisode() }
                         )
                         if (subCount > 0) {
@@ -686,7 +754,7 @@ fun PlayerScreen(
                             PlayerButton(
                                 label = "Subtitles: $label",
                                 icon = Icons.Default.ClosedCaption,
-                                focusable = barFocused,
+                                focusable = focus == PlayerFocus.BUTTONS,
                                 onClick = { cycleSubtitle() }
                             )
                         }
@@ -696,7 +764,7 @@ fun PlayerScreen(
                             PlayerButton(
                                 label = "Audio: $label",
                                 icon = Icons.AutoMirrored.Filled.VolumeUp,
-                                focusable = barFocused,
+                                focusable = focus == PlayerFocus.BUTTONS,
                                 onClick = { cycleAudio() }
                             )
                         }
@@ -748,9 +816,9 @@ fun PlayerScreen(
 
             // Keep the overlay up while stopped, buffering, failed, or mid-scrub, so the
             // user is never left staring at a black screen with no explanation.
-            LaunchedEffect(isControlsVisible, isPlaying, isBuffering, playerError, notice, seekTarget, barFocused) {
+            LaunchedEffect(isControlsVisible, isPlaying, isBuffering, playerError, notice, seekTarget, focus) {
                 if (isPlaying && !isBuffering && playerError == null && notice == null &&
-                    seekTarget == null && !barFocused
+                    seekTarget == null && focus == PlayerFocus.VIDEO
                 ) {
                     delay(4000)
                     isControlsVisible = false
