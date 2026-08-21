@@ -42,6 +42,21 @@ const loginAttempts = new Map(); // ip -> { count, firstAttemptAt }
 const MAX_LOGIN_ATTEMPTS = 10;
 const LOGIN_ATTEMPT_WINDOW_MS = 5 * 60 * 1000;
 
+/**
+ * Swept on a timer, not only when an IP comes back.
+ *
+ * isRateLimited drops an expired entry, but only for an address that makes another attempt — so a
+ * single failed login from an address that never returns is remembered forever. Spraying from many
+ * addresses therefore grew this map without bound, which is a slow leak an attacker controls the rate
+ * of. unref() so it never holds the process open.
+ */
+setInterval(() => {
+    const cutoff = Date.now() - LOGIN_ATTEMPT_WINDOW_MS;
+    for (const [ip, entry] of loginAttempts) {
+        if (entry.firstAttemptAt < cutoff) loginAttempts.delete(ip);
+    }
+}, LOGIN_ATTEMPT_WINDOW_MS).unref();
+
 const isRateLimited = (ip) => {
     const entry = loginAttempts.get(ip);
     if (!entry) return false;

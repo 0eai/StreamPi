@@ -119,6 +119,17 @@ router.get('/file/:filename', checkReadConcurrency, async (req, res) => {
         const end = endStr ? parseInt(endStr, 10) : totalSize - 1;
         const readStream = fs.createReadStream(filePath, { start, end });
         res.writeHead(206, { 'Content-Range': `bytes ${start}-${end}/${totalSize}`, 'Accept-Ranges': 'bytes', 'Content-Length': (end - start) + 1, 'Content-Type': 'video/mp4' });
+        // An unhandled 'error' on a read stream is an uncaught exception, which takes the whole node
+        // process down — every other stream and any running job with it. This is the branch every
+        // browser uses, and the trigger is not exotic: storage here can be a removable disk, and
+        // pulling it mid-playback raises exactly this. The full-file branch below already had a
+        // listener; this one did not.
+        readStream.on('error', (err) => {
+            console.error(`❌ Read failed for ${filename}: ${err.message}`);
+            try { res.destroy(); } catch (e) { /* already tearing down */ }
+        });
+        // And close the file if the viewer goes away, rather than reading to the end into a dead socket.
+        res.on('close', () => readStream.destroy());
         readStream.pipe(res);
         return;
     }
@@ -130,8 +141,14 @@ router.get('/file/:filename', checkReadConcurrency, async (req, res) => {
     readStream.on('data', (chunk) => { const job = ACTIVE_DOWNLOADS.get(filename); if (job) job.sent += chunk.length; });
     const cleanup = () => ACTIVE_DOWNLOADS.delete(filename);
     readStream.on('end', cleanup);
-    readStream.on('error', cleanup);
-    res.on('close', cleanup);
+    readStream.on('error', (err) => {
+        // cleanup alone was enough to keep ACTIVE_DOWNLOADS honest, but the listener also has to exist
+        // for its own sake: without one this event is an uncaught exception.
+        console.error(`❌ Read failed for ${filename}: ${err.message}`);
+        cleanup();
+        try { res.destroy(); } catch (e) { /* already tearing down */ }
+    });
+    res.on('close', () => { cleanup(); readStream.destroy(); });
     readStream.pipe(res);
 });
 

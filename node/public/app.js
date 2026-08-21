@@ -29,6 +29,31 @@ const NODE_OWNER_PATH_MAP = {
 };
 
 // --- helpers ---
+/**
+ * Escapes text for interpolation into an HTML template.
+ *
+ * This page builds rows with innerHTML from values it does not control. Filenames are the important
+ * ones: any user who can put a file on this node chooses that string, and isSafeFilename — which is
+ * what guards the write — is a path-traversal check, not an HTML one. It accepts
+ * `<img src=x onerror=...>.mp4` and `x" onmouseover="...".mp4` quite happily, because for its purpose
+ * they are fine.
+ *
+ * Unescaped, either one executes in this page, and this page holds the node's API key in
+ * localStorage — which is read/write/delete on everything the node stores. So the escape is not
+ * cosmetic hardening; it is what stops an upload from stealing the node.
+ *
+ * Quotes are included because several of these interpolations land inside attributes (title="...",
+ * value="...", data-id="..."), where escaping only angle brackets leaves the attribute breakable.
+ */
+function esc(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 function formatBytes(bytes) {
     if (!bytes || isNaN(bytes)) return '0 B';
     const k = 1024, sizes = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
@@ -420,7 +445,7 @@ function renderStats(stats) {
     document.getElementById('node-name').textContent = stats.id;
     document.getElementById('node-id').textContent = `roles: ${(stats.roles || []).join(', ')}`;
 
-    const badges = (stats.roles || []).map(r => `<span class="badge badge-${r}">${r}</span>`).join('');
+    const badges = (stats.roles || []).map(r => `<span class="badge badge-${esc(r)}">${esc(r)}</span>`).join('');
     document.getElementById('role-badges').innerHTML = badges;
 
     document.getElementById('tab-files').classList.toggle('hidden', !stats.roles?.includes('nas'));
@@ -461,7 +486,7 @@ function renderStats(stats) {
         jobsCard.classList.remove('hidden');
         document.getElementById('jobs-list').innerHTML = stats.jobs.map(j => `
             <div class="job-row">
-                <div class="job-row-top"><span>${j.type === 'archive' ? '⬆' : j.type === 'migrate' ? '↔' : '⬇'} ${j.filename}</span><span>${j.percent}%</span></div>
+                <div class="job-row-top"><span>${j.type === 'archive' ? '⬆' : j.type === 'migrate' ? '↔' : '⬇'} ${esc(j.filename)}</span><span>${j.percent}%</span></div>
                 <div class="job-row-bar"><div class="job-row-fill" style="width:${j.percent}%"></div></div>
             </div>
         `).join('');
@@ -475,7 +500,7 @@ function renderStats(stats) {
 function renderMigrationsStatus(migrateJobs) {
     const el = document.getElementById('cfg-migrations-status');
     if (!el) return;
-    el.innerHTML = migrateJobs.map(j => `<div class="location-migrating-note">↔ Migrating ${j.filename}: ${j.percent}% (${j.status})</div>`).join('');
+    el.innerHTML = migrateJobs.map(j => `<div class="location-migrating-note">↔ Migrating ${esc(j.filename)}: ${j.percent}% (${esc(j.status)})</div>`).join('');
 }
 
 async function pollStats() {
@@ -493,8 +518,8 @@ function renderFiles(files) {
     list.innerHTML = files.length
         ? files.map(f => `
             <div class="list-row">
-                <span class="list-row-name" title="${f.name}">${f.name}</span>
-                <span class="list-row-meta">${f.locationId ? `<span class="file-location-tag">${f.locationId}</span>` : ''}${formatBytes(f.size)}</span>
+                <span class="list-row-name" title="${esc(f.name)}">${esc(f.name)}</span>
+                <span class="list-row-meta">${f.locationId ? `<span class="file-location-tag">${esc(f.locationId)}</span>` : ''}${formatBytes(f.size)}</span>
             </div>
         `).join('')
         : '<div class="empty-note">No files stored</div>';
@@ -506,8 +531,8 @@ function renderHistory(history) {
     list.innerHTML = history.length
         ? history.map(h => `
             <div class="list-row">
-                <span class="list-row-name" title="${h.filename}">${h.filename}</span>
-                <span class="status-badge status-${h.status}">${h.status}</span>
+                <span class="list-row-name" title="${esc(h.filename)}">${esc(h.filename)}</span>
+                <span class="status-badge status-${esc(h.status)}">${esc(h.status)}</span>
                 <span class="list-row-meta">${new Date(h.finishedAt).toLocaleString()}</span>
             </div>
         `).join('')
@@ -556,9 +581,9 @@ function renderLocationRow(loc) {
     const currentGb = loc.limitBytes ? Math.round(loc.limitBytes / (1024 ** 3)) : sliderMin;
     const gb = Math.min(Math.max(currentGb, sliderMin), sliderMax);
     return `
-        <div class="location-row" data-id="${loc.id}">
+        <div class="location-row" data-id="${esc(loc.id)}">
             <div class="location-row-header">
-                <label>Storage Path<input class="location-path-input" type="text" value="${loc.path}" /></label>
+                <label>Storage Path<input class="location-path-input" type="text" value="${esc(loc.path)}" /></label>
                 <button class="btn-ghost location-remove-btn" type="button">Remove</button>
             </div>
             <div class="slider-label-row"><span>Storage Limit</span><span class="location-limit-value slider-value">${gb} GB</span></div>

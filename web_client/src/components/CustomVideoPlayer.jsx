@@ -53,6 +53,10 @@ const CustomVideoPlayer = ({ item, token, onClose, serverUrl, onPlayNext, isPubl
     // this minting step exists to add on top of a whole-account session token, a share token
     // already has, so re-minting from it would just be a redundant extra round trip.
     const [streamToken, setStreamToken] = useState(null);
+    // Mirrored into a ref because the unmount effect below is deliberately [] — it reads whatever the
+    // latest value is at teardown, which state captured at mount could not give it.
+    const streamTokenRef = useRef(null);
+    streamTokenRef.current = streamToken;
     useEffect(() => {
         if (isPublic) return;
         setStreamToken(null);
@@ -219,8 +223,13 @@ const CustomVideoPlayer = ({ item, token, onClose, serverUrl, onPlayNext, isPubl
                 videoEl.removeAttribute('src');
                 videoEl.load();
             }
-            if (!isPublic && token) {
-                navigator.sendBeacon(`${serverUrl}/api/stream/end?sessionId=${sessionId}&token=${encodeURIComponent(token)}`);
+            // The short-lived stream token, not the session token. sendBeacon cannot set headers, so
+            // whatever goes here ends up in a URL — in access logs and browser history. verifyToken
+            // checks STREAM_TOKENS first, so the minted grant works and expires on its own; the
+            // session token is only a fallback for the window before one has been issued.
+            const endToken = streamTokenRef.current || token;
+            if (!isPublic && endToken) {
+                navigator.sendBeacon(`${serverUrl}/api/stream/end?sessionId=${sessionId}&token=${encodeURIComponent(endToken)}`);
             }
         };
         // isPublic/serverUrl/token are read once here deliberately — this must fire its

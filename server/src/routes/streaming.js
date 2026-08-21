@@ -12,6 +12,29 @@ import { streamMediaFile, streamSubtitle, downloadMediaFile } from '../streamCor
 
 const router = express.Router();
 
+/**
+ * On-demand poster generation is bounded, because this route has no auth.
+ *
+ * It cannot have any: posters render as plain <img src> tags, including on public share pages, which
+ * is also how an unauthenticated caller learns valid poster filenames. On a cache miss the handler
+ * below spawns ffmpeg — so without a bound, repeating that request is a way for anyone to make a
+ * Raspberry Pi transcode on demand, as many times at once as they can open sockets.
+ *
+ * Three separate limits, because they stop different things:
+ *
+ *   - inFlight dedupes by filename. Several <img> tags for the same missing poster arrive together,
+ *     and previously each spawned its own ffmpeg writing to the same output path — they raced over
+ *     one file. Now the first does the work and the rest await it.
+ *   - A total cap, so distinct missing posters cannot be used to spawn processes without limit. Past
+ *     it the answer is 503, which for an <img> is a broken image rather than a downed server.
+ *   - A timeout, since fluent-ffmpeg has none of its own and a NAS-hosted source can stall
+ *     indefinitely, holding a slot for as long as it does.
+ */
+const POSTER_GEN_MAX_CONCURRENT = 2;
+const POSTER_GEN_TIMEOUT_MS = 20000;
+const posterGenInFlight = new Map(); // filename -> Promise
+
+
 router.get('/api/posters/:filename', async (req, res) => {
     const { filename } = req.params;
     // No auth on this route by design (posters render as plain <img src> tags), which makes
@@ -48,8 +71,35 @@ router.get('/api/posters/:filename', async (req, res) => {
             return res.status(404).send("Local file missing");
         }
 
-        await new Promise((resolve, reject) => {
+        // Someone else already generating this exact poster: wait for them rather than starting a
+        // second ffmpeg over the same output path.
+        const existing = posterGenInFlight.get(filename);
+        if (existing) {
+            await existing;
+            if (existsSync(thumbPath)) return res.sendFile(thumbPath);
+            return res.status(404).send("Poster not available");
+        }
+
+        if (posterGenInFlight.size >= POSTER_GEN_MAX_CONCURRENT) {
+            // A broken image for one request, rather than an unbounded queue of transcodes.
+            return res.status(503).send("Busy generating posters — try again shortly");
+        }
+
+        const generation = new Promise((resolve, reject) => {
             const cmd = ffmpeg();
+            let settled = false;
+            const finish = (err) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                if (err) reject(err); else resolve();
+            };
+            // fluent-ffmpeg has no timeout of its own, and a stalled NAS source would otherwise hold
+            // this slot indefinitely.
+            const timer = setTimeout(() => {
+                try { cmd.kill('SIGKILL'); } catch (e) { /* already gone */ }
+                finish(new Error('poster generation timed out'));
+            }, POSTER_GEN_TIMEOUT_MS);
 
             cmd.inputOptions(inputOptions);
             cmd.input(inputPath);
@@ -59,10 +109,17 @@ router.get('/api/posters/:filename', async (req, res) => {
                 '-vf', 'scale=320:-1'
             ])
             .output(thumbPath)
-            .on('end', resolve)
-            .on('error', reject)
+            .on('end', () => finish())
+            .on('error', (e) => finish(e))
             .run();
         });
+
+        posterGenInFlight.set(filename, generation);
+        try {
+            await generation;
+        } finally {
+            posterGenInFlight.delete(filename);
+        }
 
         res.sendFile(thumbPath);
 
