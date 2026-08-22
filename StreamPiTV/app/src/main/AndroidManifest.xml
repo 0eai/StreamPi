@@ -45,12 +45,25 @@
             android:icon="@mipmap/ic_launcher"
             android:label="@string/app_name"
             android:theme="@style/Theme.StreamPiTV">
+            <!--
+              Two separate intent-filters, not one carrying both categories.
+              
+              With LAUNCHER and LEANBACK_LAUNCHER in the same filter, Fire OS resolves this
+              activity as an ordinary launcher entry and draws the home tile from android:icon —
+              which on Fire OS 7 means the adaptive icon's foreground on the launcher's own grey
+              plate, so the tile shows a small centred logo with grey bars instead of the 16:9
+              banner. Splitting them lets leanback resolution find a filter of its own.
+              
+              LEANBACK first so it is the one matched preferentially on a TV. The LAUNCHER filter
+              stays because this same APK is installed on phones, where leanback means nothing.
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
-
-                <!-- TV Launcher Intent (Makes it appear on Android TV Home Screen) -->
-                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
         </activity>
     </application>
